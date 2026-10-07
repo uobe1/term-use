@@ -69,4 +69,17 @@ e=json.load(open('$TMP/noint.json'))['error']
 assert e['code']=='no-shell-integration', e
 " || fail "expected no-shell-integration"
 
+# --- regression: on a ready shell, --until mismatch + --shell-ready must
+#     report plain timeout (shell-not-ready would push agents to send a
+#     quit key to an idle shell) ---
+if $TD wait -n "$NAME" --until 'ZZZ_NEVER_13' --shell-ready --timeout 3 \
+     >/dev/null 2>"$TMP/combo.json"; then
+  fail "combined --until/--shell-ready wait must not meet"
+fi
+python3 -c "
+import json,sys
+e=json.load(open('$TMP/combo.json'))['error']
+assert e['code']=='timeout', e
+" || fail "expected plain timeout: shell is ready, --until is the laggard"
+
 echo "E2E-13 PASS"

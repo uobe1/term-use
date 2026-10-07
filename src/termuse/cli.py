@@ -5,6 +5,7 @@ All failures surface as single-line JSON errors (termuse.errors.TDError).
 """
 import argparse
 import json
+import os
 import re
 import shlex
 import sys
@@ -77,7 +78,9 @@ def cmd_start(args) -> int:
     # Shell integration: bash sessions get an injected rcfile (OSC 133).
     cmd = args.cmd
     if cmd.split()[0].endswith("bash"):
-        system_bashrc = "/data/data/com.termux/files/usr/etc/bash.bashrc"
+        system_bashrc = (os.environ.get("TERMUX__PREFIX",
+                                        "/data/data/com.termux/files/usr")
+                         + "/etc/bash.bashrc")
         rc = writer.dir / "bashrc"
         rc.write_text(rcfile.bashrc_template(system_bashrc))
         cmd = f"bash --rcfile {shlex.quote(str(rc))} -i"
@@ -133,6 +136,15 @@ def cmd_stop(args) -> int:
 
 
 def cmd_send(args) -> int:
+    # Argument validation comes before any target resolution: an invalid
+    # --repeat/--delay must fail as invalid-arguments regardless of whether
+    # the session exists (error codes must not depend on target state).
+    repeat = args.repeat
+    delay = args.delay
+    if repeat < 1:
+        raise TDError("invalid-arguments", f"--repeat must be >= 1 (got {repeat})")
+    if delay < 0:
+        raise TDError("invalid-arguments", f"--delay must be >= 0 (got {delay})")
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
     # Records only for managed sessions: creating a V2Writer would mkdir a
@@ -140,12 +152,6 @@ def cmd_send(args) -> int:
     # accumulate bogus record dirs.
     writer = records.V2Writer(target.session) if state else None
     offset = writer.size() if writer else 0  # where output caused by this send starts
-    repeat = args.repeat
-    delay = args.delay
-    if repeat < 1:
-        raise TDError("invalid-arguments", f"--repeat must be >= 1 (got {repeat})")
-    if delay < 0:
-        raise TDError("invalid-arguments", f"--delay must be >= 0 (got {delay})")
     sent_text = "".join(args.type or [])
     warning = None
     events: list[dict] = []
@@ -220,7 +226,8 @@ def cmd_screen(args) -> int:
             print(json.dumps(tdscreen.rows_to_runs(grid), ensure_ascii=False))
         elif args.grep:
             if args.fg is None and args.bg is None and not args.attr:
-                raise TDError("session-missing", "--grep needs at least one of --fg/--bg/--attr")
+                raise TDError("invalid-arguments",
+                              "--grep needs at least one of --fg/--bg/--attr")
             for row in grid:
                 if tdscreen.row_matches(row, args.fg, args.bg, args.attr or ()):
                     print(tdscreen.grid_row_text(row))
@@ -348,10 +355,13 @@ def cmd_wait(args) -> int:
         if time.monotonic() >= deadline:
             break
         time.sleep(args.interval)
-    if args.shell_ready:
+    if args.shell_ready and waiting.shell_ready_unmet(ctx, cond):
         # The probe timeout IS the signal: a live interactive program swallows
         # `true` instead of letting bash execute it. Surface it as its own
         # code so agents can branch (quit key + re-probe) without parsing text.
+        # If the probe WAS answered, fall through to the plain timeout below:
+        # the laggard is another condition (--until etc.), and pushing a quit
+        # key at an idle shell would be a misdiagnosis.
         raise TDError("shell-not-ready",
                       f"shell did not answer the `true` probe within {args.timeout}s",
                       hint="likely inside an interactive program — inspect "
@@ -433,7 +443,7 @@ def cmd_trace(args) -> int:
                 continue
             if isinstance(ev, dict):  # v2 header
                 print(f"# v{ev.get('version')} {ev.get('width')}x{ev.get('height')}"
-                      f" cmd={ev.get('cmd')!r} socket={ev.get('env') and '' or ''}")
+                      f" cmd={ev.get('cmd')!r}")
                 continue
             ts, code, data = ev
             if code == "o":

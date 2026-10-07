@@ -392,6 +392,20 @@ class QuietCondition(Condition):
         return {**super().to_json(met), "ms": self.ms}
 
 
+def shell_ready_unmet(ctx, cond: "AllOf") -> bool:
+    """Timeout diagnosis for --shell-ready: is the probe itself unanswered?
+
+    AllOf's short-circuit `all()` can leave the ShellReady member
+    unevaluated (its CmdDone records exit_code only on success), so
+    re-evaluate it once here — the replay is idempotent. False means the
+    shell DID answer: the timeout came from another condition (--until
+    etc.) and must surface as plain timeout, not shell-not-ready (which
+    would push agents to send a quit key to an idle shell).
+    """
+    sr = next(c for c in cond.conditions if isinstance(c, ShellReady))
+    return not sr.evaluate(ctx)
+
+
 def timeout_evidence(ctx, condition: Condition) -> dict:
     """Evidence snapshot for an unmet wait: screen, cursor, raw tail, state."""
     try:

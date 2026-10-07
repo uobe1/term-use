@@ -59,6 +59,38 @@ def test_allof_takes_weakest_with_until():
     assert combo.confidence == "inference", "weakest member wins"
 
 
+class _FakeDone:
+    """CmdDone stand-in: evaluate verdict fixed, exit_code recorded on success
+    (mirrors the real CmdDone contract the timeout diagnosis relies on)."""
+
+    def __init__(self, answered: bool):
+        self.answered = answered
+        self.exit_code = 0 if answered else None
+
+    def evaluate(self, ctx):
+        return self.answered
+
+    def to_json(self, met):
+        return {"type": "cmd-done", "confidence": "fact", "met": met,
+                "expect_code": 0, "exit_code": self.exit_code if met else None}
+
+
+def test_timeout_diagnosis_probe_unanswered_is_shell_not_ready():
+    sr = ShellReady("td-unit-any")
+    sr._done = _FakeDone(answered=False)
+    combo = waiting.AllOf([sr, UntilRegex("ZZZ_NEVER")])
+    assert waiting.shell_ready_unmet(ctx_with("$ "), combo), \
+        "unanswered probe -> shell-not-ready"
+
+
+def test_timeout_diagnosis_probe_answered_is_plain_timeout():
+    sr = ShellReady("td-unit-any")
+    sr._done = _FakeDone(answered=True)
+    combo = waiting.AllOf([sr, UntilRegex("ZZZ_NEVER")])
+    assert not waiting.shell_ready_unmet(ctx_with("$ "), combo), \
+        "answered probe -> the laggard is --until, plain timeout"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

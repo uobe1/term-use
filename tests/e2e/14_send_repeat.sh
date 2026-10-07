@@ -52,4 +52,26 @@ e=json.load(open('$TMP/bad.json'))['error']
 assert e['code']=='invalid-arguments', e
 " || fail "expected invalid-arguments error for --repeat 0"
 
+# --- validation ordering: the same bad args must fail identically on a
+#     target that doesn't exist (error code independent of session state) ---
+if $TD send -n "td14_absent_$$_$RANDOM" --key Up --repeat 0 \
+     >/dev/null 2>"$TMP/absent.json"; then
+  fail "--repeat 0 on a missing target must fail"
+fi
+python3 -c "
+import json,sys
+e=json.load(open('$TMP/absent.json'))['error']
+assert e['code']=='invalid-arguments', e
+" || fail "expected invalid-arguments regardless of target existence"
+
+# --- bad hex is an argument error, not a runtime/target error ---
+if $TD send -n "$NAME" --hex zz >/dev/null 2>"$TMP/hex.json"; then
+  fail "--hex zz must fail"
+fi
+python3 -c "
+import json,sys
+e=json.load(open('$TMP/hex.json'))['error']
+assert e['code']=='invalid-arguments', e
+" || fail "expected invalid-arguments error for --hex zz"
+
 echo "E2E-14 PASS"

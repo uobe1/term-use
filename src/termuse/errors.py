@@ -22,8 +22,6 @@ ERROR_CODES = (
     "tty-echo-broken",
     # Image channel: Pillow unavailable (or disabled via env switch).
     "pillow-missing",
-    # Skeleton-phase placeholder; removed once all subcommands are implemented.
-    "not-implemented",
 )
 
 

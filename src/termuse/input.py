@@ -96,7 +96,7 @@ def hex_to_args(h: str) -> list[str]:
     """
     h = h.strip().lower()
     if len(h) % 2 or not all(c in "0123456789abcdef" for c in h):
-        raise TDError("session-missing", f"bad hex {h!r}",
+        raise TDError("invalid-arguments", f"bad hex {h!r}",
                       hint="even-length hex string, e.g. 1c or 1b5b3133")
     args: list[str] = []
     for i in range(0, len(h), 2):
@@ -113,7 +113,7 @@ def send(target: tmuxio.Target, text: list[str], keys: list[str],
         events.append({"text": t})
     for k in keys:
         if k not in KNOWN_KEYS:
-            raise TDError("session-missing", f"unknown key {k!r}",
+            raise TDError("invalid-arguments", f"unknown key {k!r}",
                           hint=f"known keys: {', '.join(sorted(KNOWN_KEYS))}; "
                                f"raw bytes go through send --hex")
         _run_or_die(target, [k], f"key {k}")
