@@ -32,7 +32,8 @@ def ok(res: subprocess.CompletedProcess) -> bool:
 _FAILURE_PATTERNS = (
     (("access not allowed", "permission denied", "operation not permitted",
       "connect to server failed", "connection refused", "lost server",
-      "server exited", "protocol version", "invalid argument: -L"),
+      "server exited", "protocol version", "couldn't create directory",
+      "not a directory", "no such file or directory"),
      "socket-unreachable",
      "the tmux server socket is not usable from here. On a shared machine the "
      "default socket under /tmp/tmux-<uid> may belong to another user or "

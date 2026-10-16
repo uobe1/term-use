@@ -34,15 +34,51 @@ MONO_FAMILIES = (
     "droidsansmono", "ubuntumono", "cascadiamono", "jetbrainsmono", "hack",
 )
 
-# Standard freedesktop font locations, probed only after the Android/Termux
-# ones. Without these the image channel was dead on every desktop/server Linux.
-LINUX_FONT_DIRS = (
-    "/usr/share/fonts",
-    "/usr/local/share/fonts",
-    os.path.join(os.environ.get("XDG_DATA_HOME")
-                 or os.path.expanduser("~/.local/share"), "fonts"),
-    os.path.expanduser("~/.fonts"),
-)
+# Standard locations, probed in a *convention* order: an environment variable
+# the operator set means something, so env-derived paths come before
+# machine-wide ones. Nothing here names a device — `$PREFIX` is the shared
+# convention of conda, Nix profiles, stow and Termux alike.
+def font_dirs() -> list[str]:
+    """Directories to search for monospace fonts.
+
+    `TERM_USE_FONT_DIRS` (path-separated) *replaces* the list: it is a
+    statement of what to use, not a hint, so pointing it at an empty directory
+    must yield font-missing rather than silently falling back elsewhere.
+    """
+    override = os.environ.get("TERM_USE_FONT_DIRS")
+    if override:
+        return [p for p in override.split(os.pathsep) if p]
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(
+        "~/.local/share")
+    dirs = [data_home + "/fonts"]
+    for prefix in filter(None, (os.environ.get("PREFIX"),
+                                os.environ.get("SYSROOT"),
+                                os.environ.get("CONDA_PREFIX"),
+                                os.environ.get("NM_PREFIX_PATH"))):
+        dirs.append(os.path.join(prefix, "share", "fonts"))
+    dirs += [
+        os.path.expanduser("~/.fonts"),
+        os.path.expanduser("~/.local/share/fonts"),
+        "/usr/local/share/fonts",
+        "/usr/share/fonts",
+        "/usr/share/fonts/truetype",
+        # macOS conventions
+        os.path.expanduser("~/Library/Fonts"),
+        "/Library/Fonts",
+        "/System/Library/Fonts",
+        # Android system font dir (kept as one convention among many, no
+        # longer first — it used to be the only thing probed)
+        "/system/fonts",
+    ]
+    return dirs
+
+
+def _candidate_paths(dirs) -> list[str]:
+    out = []
+    for d in dirs:
+        for pattern in ("**/*.ttf", "**/*.otf", "**/*.ttc"):
+            out.extend(glob.glob(os.path.join(d, pattern), recursive=True))
+    return out
 
 
 def rank_mono(name: str) -> int:
@@ -75,15 +111,10 @@ def rank_style(name: str) -> int:
 def select_mono(dirs) -> str | None:
     """Best-ranked monospace .ttf/.otf under dirs, or None if there is none.
 
-    Proportional fonts are refused on purpose: they redraw the cell grid at the
+    Proportional faces are refused on purpose: they redraw the cell grid at the
     wrong pitch, so the picture would silently misrepresent the screen.
     """
-    cands = []
-    for d in dirs:
-        for pattern in ("**/*.ttf", "**/*.otf"):
-            for path in glob.glob(os.path.join(d, pattern), recursive=True):
-                if "mono" in os.path.basename(path).lower():
-                    cands.append(path)
+    cands = [p for p in _candidate_paths(dirs) if is_mono_name(p)]
     if not cands:
         return None
     return sorted(cands, key=lambda p: (
@@ -92,9 +123,21 @@ def select_mono(dirs) -> str | None:
         os.path.basename(p)))[0]
 
 
+# Names that mean "fixed pitch" in a filename, plus the well-known monospace
+# families that do not carry the word (Menlo, Consolas, Courier, SF Mono...).
+MONO_NAME_HINTS = ("mono", "menlo", "consolas", "courier", "cascadia", "hack",
+                   "jetbrains", "fira", "source-code", "sourcecode", "inconsolata",
+                   "input", "ibm-plex-mono", "plexmono", "ubuntu", "agave",
+                   "iosevka", "cotrone", "comic-mono", "recursive-mono")
+
+
+def is_mono_name(path: str) -> bool:
+    low = os.path.basename(path).lower().replace("_", "-")
+    return any(h in low for h in MONO_NAME_HINTS)
+
+
 def find_font() -> str | None:
-    """Probing order: $TERM_USE_FONT, DroidSansMono, any /system mono,
-    $PREFIX share mono, then the standard Linux font dirs."""
+    """$TERM_USE_FONT (a file) wins; otherwise probe by convention."""
     override = os.environ.get("TERM_USE_FONT")
     if override:
         if not os.path.isfile(override):
@@ -104,14 +147,7 @@ def find_font() -> str | None:
                 hint="unset TERM_USE_FONT to auto-probe, or point it at a real "
                      "monospace .ttf/.otf")
         return override
-    cands = glob.glob("/system/fonts/DroidSansMono*.ttf")
-    cands += [p for p in glob.glob("/system/fonts/*.ttf") if "mono" in p.lower()]
-    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-    cands += [p for p in glob.glob(f"{prefix}/share/fonts/**/*.ttf", recursive=True)
-              if "mono" in p.lower()]
-    if cands:
-        return cands[0]
-    return select_mono(LINUX_FONT_DIRS)
+    return select_mono(font_dirs())
 
 
 def pixel(color) -> tuple | None:

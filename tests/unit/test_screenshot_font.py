@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from termuse import screenshot as tdscreenshot
 from termuse.errors import TDError
 from termuse.screenshot import find_font, rank_mono, rank_style, select_mono
 
@@ -96,24 +97,61 @@ def test_rank_mono_orders_by_preference():
         or rank_mono("DejaVuSansMono-Bold.ttf") < rank_mono("ZebraMono.ttf")
 
 
-def test_termux_paths_keep_priority_over_linux_dirs():
-    """The Android/Termux probes are the author's target environment; the new
-    Linux probe must only ever run after them, never reorder them."""
-    if os.path.isdir("/system/fonts"):
-        print("skip test_termux_paths_keep_priority_over_linux_dirs (real Termux/Android)")
-        return
+def test_font_dirs_follows_conventions_not_one_device():
+    """Probe order must be environment-driven. The old code hardcoded the
+    Android/Termux layout first (and a com.termux path as the default PREFIX),
+    which reads as "this works on the author's phone" to everyone else."""
+    old = {k: os.environ.get(k) for k in
+           ("TERM_USE_FONT_DIRS", "PREFIX", "XDG_DATA_HOME", "SYSROOT",
+            "CONDA_PREFIX", "HOME")}
     with tempfile.TemporaryDirectory() as tmp:
-        old = os.environ.get("PREFIX")
-        os.environ["PREFIX"] = tmp
         try:
-            _touch(tmp, {"share/fonts/dejavu": ["DejaVuSansMono.ttf"]})
-            assert find_font().endswith("DejaVuSansMono.ttf"), "Termux hit must win"
-            assert find_font().startswith(tmp)
+            os.environ.pop("TERM_USE_FONT_DIRS", None)
+            os.environ["PREFIX"] = os.path.join(tmp, "prefix")
+            os.environ["XDG_DATA_HOME"] = os.path.join(tmp, "xdg")
+            dirs = tdscreenshot.font_dirs()
+            assert os.path.join(tmp, "prefix", "share", "fonts") in dirs, dirs
+            assert os.path.join(tmp, "xdg", "fonts") in dirs, dirs
+            assert "/usr/share/fonts" in dirs, dirs
+            assert not any("com.termux" in d for d in dirs), dirs
+            assert dirs[0].startswith(tmp), f"my env must be probed first: {dirs}"
         finally:
-            if old is None:
-                del os.environ["PREFIX"]
-            else:
-                os.environ["PREFIX"] = old
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def test_explicit_font_dirs_replaces_the_probe_list():
+    """TERM_USE_FONT_DIRS is an instruction, not a hint: an empty one must not
+    quietly fall back to the system fonts."""
+    old = os.environ.get("TERM_USE_FONT_DIRS")
+    try:
+        os.environ["TERM_USE_FONT_DIRS"] = "/no/such/dir" + os.pathsep + "/also/nope"
+        assert tdscreenshot.font_dirs() == ["/no/such/dir", "/also/nope"]
+        assert tdscreenshot.select_mono(tdscreenshot.font_dirs()) is None
+    finally:
+        if old is None:
+            del os.environ["TERM_USE_FONT_DIRS"]
+        else:
+            os.environ["TERM_USE_FONT_DIRS"] = old
+
+
+def test_prefix_share_fonts_tree_is_discoverable():
+    with tempfile.TemporaryDirectory() as tmp:
+        dirs = _touch(tmp, {"prefix/share/fonts/dejavu": ["DejaVuSansMono.ttf"]})
+        found = tdscreenshot.select_mono([os.path.join(tmp, "prefix/share/fonts")])
+        assert found and found.endswith("DejaVuSansMono.ttf"), (dirs, found)
+
+
+def test_monospace_families_without_the_word_mono_are_still_found():
+    """Menlo/Consolas/Cascadia are monospace; refusing them because of a naming
+    habit would kill the image channel on macOS by default."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dirs = _touch(tmp, {"fonts": ["Menlo-Regular.ttf"]})
+        assert tdscreenshot.is_mono_name(os.path.join(dirs[0], "Menlo-Regular.ttf"))
+        assert tdscreenshot.select_mono(dirs).endswith("Menlo-Regular.ttf")
 
 
 def test_term_use_font_override_is_honored():

@@ -102,11 +102,8 @@ def cmd_start(args) -> int:
     # Shell integration: bash sessions get an injected rcfile (OSC 133).
     cmd = args.cmd
     if cmd.split()[0].endswith("bash"):
-        system_bashrc = (os.environ.get("TERMUX__PREFIX",
-                                        "/data/data/com.termux/files/usr")
-                         + "/etc/bash.bashrc")
         rc = writer.dir / "bashrc"
-        rc.write_text(rcfile.bashrc_template(system_bashrc))
+        rc.write_text(rcfile.bashrc_template())
         cmd = f"bash --rcfile {shlex.quote(str(rc))} -i"
         writer.state["shell_integration"] = True
         writer.save_state()
@@ -339,6 +336,19 @@ def _with_context(ctx, cond) -> dict:
     return ev
 
 
+def _exit_code_of(conditions: list) -> int | None:
+    """The exit code the oracle that answered actually observed, if any.
+
+    Quiet sampling has no exit code to report and --done must not invent one:
+    None here is the honest answer, not a missing field.
+    """
+    for c in conditions:
+        if isinstance(c, (waiting.CmdDone, waiting.ShellReady,
+                          waiting.ExitCondition)):
+            return getattr(c, "exit_code", None)
+    return None
+
+
 def cmd_wait(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
@@ -353,15 +363,12 @@ def cmd_wait(args) -> int:
 
     conditions: list = []
     managed = state is not None
-    if args.until is not None:
-        conditions.append(waiting.UntilRegex(args.until, args.scrollback,
-                                             target.session, managed=managed))
-    if args.cmd_done:
-        require_shell_integration(target, state)
-        conditions.append(waiting.CmdDone(target.session, args.expect_code))
-    if args.shell_ready:
-        # The `true` probe (skill's standard loop, internalized): text and
-        # Enter are separate send-keys calls (the split-send red line).
+    via: str | None = None
+    advice: str | None = None
+
+    def inject_probe() -> None:
+        """The `true` probe (the skill's standard loop, internalized): text
+        and Enter are separate send-keys calls (the split-send red line)."""
         require_shell_integration(target, state)
         probe_offset = writer.size()
         probe = tdinput.send(target, ["true"], ["Enter"], [])
@@ -370,6 +377,51 @@ def cmd_wait(args) -> int:
         writer.state = state
         writer.save_state()
         conditions.append(waiting.ShellReady(target.session))
+
+    if args.since_send and args.until is None:
+        raise TDError("invalid-arguments",
+                      "--since-send scopes --until to output after the last "
+                      "send, so it needs --until",
+                      hint="or use --done to wait for the command itself")
+    if args.since_send and args.scrollback:
+        raise TDError("invalid-arguments",
+                      "--since-send reads the raw stream since the last send "
+                      "while --scrollback reads screen history — pick one")
+    if args.until is not None:
+        scope = "since-send" if args.since_send else "screen"
+        if scope == "since-send" and not managed:
+            raise TDError(
+                "unmanaged-pane",
+                f"--since-send needs term-use's own recording to know where "
+                f"the last send started; pane {args.name!r} has no state.json",
+                hint="address the fresh output some other way: --until matches "
+                     "the current screen (and caps at heuristic on unmanaged "
+                     "panes), or start the target with term-use start")
+        conditions.append(waiting.UntilRegex(args.until, args.scrollback,
+                                             target.session, managed=managed,
+                                             scope=scope))
+        advice = waiting.oracle_advice(state, "until")
+    if args.done:
+        # Strongest oracle this target actually supports — the agent should
+        # not have to know which of our channels its pane can satisfy.
+        oracle = waiting.choose_done_oracle(state)
+        via = waiting.DONE_VIA[oracle]
+        if oracle == "probe":
+            inject_probe()
+        elif oracle == "osc133":
+            conditions.append(waiting.CmdDone(target.session, args.expect_code))
+        elif oracle == "pane-exit":
+            conditions.append(waiting.ExitCondition(args.expect_code, managed=True))
+        else:
+            conditions.append(waiting.QuietCondition(
+                target.session, waiting.DEFAULT_DONE_QUIET_MS,
+                managed=(oracle == "quiet")))
+            advice = waiting.oracle_advice(state, oracle)
+    if args.cmd_done:
+        require_shell_integration(target, state)
+        conditions.append(waiting.CmdDone(target.session, args.expect_code))
+    if args.shell_ready:
+        inject_probe()
     if args.exit:
         if not managed:
             # Anchor: fail fast on a target that never existed. tmux answers
@@ -389,9 +441,11 @@ def cmd_wait(args) -> int:
         conditions.append(waiting.QuietCondition(target.session, args.quiet_ms,
                                                  managed=managed))
     if not conditions:
-        raise TDError("session-missing", "wait needs a condition",
-                      hint="use --until, --cmd-done, --shell-ready, --exit "
-                           "or --quiet-ms")
+        raise TDError("invalid-arguments", "wait needs a condition",
+                      hint="--done (finish the last thing you sent, strongest "
+                           "oracle available), --cmd-done, --shell-ready, "
+                           "--exit, --quiet-ms, or --until 'regex' "
+                           "(add --since-send to match only new output)")
     cond = waiting.AllOf(conditions)
     ctx = waiting.WaitContext(capture, pane_meta)
 
@@ -406,13 +460,22 @@ def cmd_wait(args) -> int:
             except TDError:
                 screen = None  # pane/session just vanished (unmanaged --exit)
             verdict_ctx = tdbudget.text_context(screen or "")
-            print(json.dumps({
+            verdict = {
                 "verdict": "met",
                 "confidence": cond.confidence,
                 **cond.to_json(True),
                 "evidence": {"screen": screen},
                 "context": verdict_ctx,
-            }, ensure_ascii=False))
+            }
+            if via:
+                verdict["via"] = via
+            if advice:
+                verdict["advice"] = advice
+            if args.done:
+                # The exit code belongs at the top level for --done: the whole
+                # question an agent is asking is "did it finish, and how".
+                verdict["exit_code"] = _exit_code_of(conditions)
+            print(json.dumps(verdict, ensure_ascii=False))
             tdbudget.warn(verdict_ctx, target.session)
             return 0
         # EOF early-termination: a dead pane can never satisfy --until or
@@ -648,6 +711,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", "--name", required=True, help="session name (or target)")
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
     p.add_argument("--until", default=None, help="regex to wait for")
+    p.add_argument("--done", action="store_true",
+                   help="wait for the last thing you sent to finish, using the "
+                        "strongest oracle this target supports (verdict reports "
+                        "`via` + exit_code: osc133/shell-ready-probe/pane-exit "
+                        "are fact, quiet-sampling is heuristic)")
+    p.add_argument("--since-send", action="store_true",
+                   help="with --until: match only output the pane emitted after "
+                        "the last send, so a stale anchor on screen cannot "
+                        "satisfy the wait (needs a managed session)")
     p.add_argument("--cmd-done", action="store_true",
                    help="wait for the OSC 133 command-done marker (fact)")
     p.add_argument("--shell-ready", action="store_true",

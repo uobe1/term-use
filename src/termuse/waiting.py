@@ -11,9 +11,13 @@ import re
 import time
 
 from termuse import osc133, records
+from termuse import screen as screen_mod
 from termuse.errors import TDError
 
 CONFIDENCE_ORDER = ("fact", "inference", "heuristic")  # strong -> weak
+
+# What `wait --done` settles on when the target supports no stronger oracle.
+DEFAULT_DONE_QUIET_MS = 700
 
 
 class Condition:
@@ -47,11 +51,12 @@ class UntilRegex(Condition):
     confidence = "inference"
 
     def __init__(self, pattern: str, scrollback: int = 0, session: str | None = None,
-                 managed: bool = True):
+                 managed: bool = True, scope: str = "screen"):
         self.pattern = pattern
         self.scrollback = scrollback
         self.session = session
         self.managed = managed
+        self.scope = scope
         self.echo_suspect = False
         self.rx = re.compile(pattern, re.DOTALL | re.MULTILINE)
         if not managed:
@@ -63,9 +68,30 @@ class UntilRegex(Condition):
             self.degraded = "unmanaged"
 
     def evaluate(self, ctx) -> bool:
+        if self.scope == "since-send":
+            return self._evaluate_stream()
         screen = ctx.capture(self.scrollback)
         if self.rx.search(screen) or self._match_stripped(screen):
             return self._check_echo(screen)
+        return False
+
+    def _evaluate_stream(self) -> bool:
+        """Match only what the pane emitted *after* the last send.
+
+        `--until` reads the screen, so an anchor still sitting on it from an
+        earlier command satisfies a new wait instantly — the skill's stale-
+        anchor warning, now escapable. The raw stream since `last_send_offset`
+        cannot contain anything from before the send, so a match here is
+        genuinely new output. Caveat worth knowing: this is the *byte* stream,
+        which a line-oriented program writes linearly but a full-screen redraw
+        can split with cursor-motion sequences — for TUI frames, keep matching
+        the screen.
+        """
+        state = records.read_state(self.session)
+        stream = records.stream_since(self.session, state.get("last_send_offset", 0))
+        text = screen_mod.visible_text(stream)
+        if self.rx.search(text) or self._match_stripped(text):
+            return self._check_echo(text)
         return False
 
     def _match_stripped(self, screen: str) -> bool:
@@ -105,7 +131,7 @@ class UntilRegex(Condition):
 
     def to_json(self, met: bool) -> dict:
         return {**super().to_json(met), "pattern": self.pattern,
-                "scrollback": self.scrollback,
+                "scrollback": self.scrollback, "scope": self.scope,
                 "echo_suspect": self.echo_suspect}
 
 
@@ -216,6 +242,83 @@ class ShellReady(Condition):
 
     def to_json(self, met: bool) -> dict:
         return {**self._done.to_json(met), "type": self.label}
+
+    @property
+    def exit_code(self) -> int | None:
+        return self._done.exit_code
+
+
+SHELL_COMMANDS = ("bash", "sh", "dash", "zsh", "ksh", "fish", "csh", "tcsh",
+                  "login", "shell")
+
+
+def program_is_pane(cmd: str | None) -> bool:
+    """True when the pane's own process is the target program (not a shell).
+
+    For those, "the command finished" and "the pane died" are the same event,
+    so `wait --exit` is the fact-level oracle; in a shell pane the pane never
+    dies and completion has to come from the shell protocol.
+    """
+    prog = str(cmd or "").strip().split(" ")
+    base = prog[0].rsplit("/", 1)[-1] if prog and prog[0] else ""
+    if not base:
+        return False
+    return not any(base == s or base.startswith(s + "-") for s in SHELL_COMMANDS)
+
+
+def choose_done_oracle(state: dict | None) -> str:
+    """Which oracle `wait --done` should use for this target.
+
+    An oracle is named only when its evidence actually exists — the whole
+    point of --done is that the agent does not have to know what the target
+    supports, and it must never be told "fact" by a lucky screen scrape.
+    """
+    if state is None:
+        return "quiet-unmanaged"          # no records: screen stability only
+    if state.get("shell_integration"):
+        return "probe" if not state.get("last_send_offset") else "osc133"
+    if program_is_pane(state.get("cmd")):
+        return "pane-exit"
+    return "quiet"
+
+
+DONE_VIA = {
+    "osc133": "osc133",
+    "probe": "shell-ready-probe",
+    "pane-exit": "pane-exit",
+    "quiet": "quiet-sampling",
+    "quiet-unmanaged": "quiet-sampling-unmanaged",
+}
+
+
+def oracle_advice(state: dict | None, chosen: str | None) -> str | None:
+    """How to get stronger evidence than the channel just used, if possible.
+
+    Agents pick `--until` because it is the only flag they remember; the
+    verdict is the moment to tell them what this target could prove instead.
+    """
+    if state is None:
+        return ("unmanaged pane (term-use did not start it): shell-protocol "
+                "facts are unavailable here, so --until/--quiet-ms run "
+                "screen-only at heuristic confidence. For fact-level waits, "
+                "launch the target with: term-use start -n NAME --cmd bash")
+    if chosen == "until":
+        if state.get("shell_integration"):
+            return ("this session has OSC 133 shell integration: --done "
+                    "(or --cmd-done) proves the command finished at fact "
+                    "level and carries its exit code, while --until only "
+                    "proves some text is on the screen. Add --since-send to "
+                    "make --until match only output produced after the last "
+                    "send (kills stale anchors).")
+        return ("no shell integration in this session: anchor --until on the "
+                "program's own output, or start with --cmd bash/--cmd zsh to "
+                "get fact-level --done")
+    if chosen in ("quiet", "quiet-unmanaged"):
+        return ("quiet sampling is heuristic — it proves the pane stopped "
+                "writing, not that the command exited. --cmd bash or --cmd "
+                "zsh gets a fact-level oracle; for a program that IS the "
+                "pane, wait --exit is fact.")
+    return None
 
 
 class ExitCondition(Condition):
