@@ -9,9 +9,9 @@ agent-first, in the spirit of open-source AI-skill projects like
 the agent*, the CLI is the tool interface, and every answer comes with evidence
 attached.
 
-![version](https://img.shields.io/badge/version-2.0.0a3-orange)
+![version](https://img.shields.io/badge/version-2.0.0a4-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
-![requires](https://img.shields.io/badge/external%20dep-tmux%203.x-1BB91F)
+![requires](https://img.shields.io/badge/external%20dep-tmux%203.2a%2b-1BB91F)
 ![stars](https://img.shields.io/github/stars/uobe1/term-use?style=social)
 ![issues](https://img.shields.io/github/issues/uobe1/term-use)
 ![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
@@ -76,17 +76,22 @@ directory) and triggers by description, so your agent just works. Read it standa
 
 ```bash
 term-use start -n demo --cmd bash --width 100 --height 30
-term-use wait  -n demo --shell-ready --timeout 10
 term-use send  -n demo --type "make build" --key Enter
-term-use wait  -n demo --cmd-done --expect-code 0 --timeout 120
-# → {"verdict": "met", "confidence": "fact", "exit_code": 0, ...}
+term-use wait  -n demo --done --expect-code 0 --timeout 120
+# → {"verdict": "met", "confidence": "fact", "via": "osc133", "exit_code": 0, ...}
+term-use out   -n demo            # what it printed, inside a context budget
 ```
 
-That's the whole loop: *start → shell-ready → send → wait for fact → act*. The
-wait engine also speaks regex (`--until`), quiet detection (`--quiet-ms`), pane
-death (`--exit`), AND-composition, and SGR mouse (`click X Y`); `send` handles
-debounced key rhythms (`--repeat N --delay S`) and `screen --find` turns text
-into 1-based click-ready coordinates.
+That's the whole loop: *start → send → wait for fact → read the output → act*.
+`--done` picks the strongest completion proof the target supports (OSC 133 →
+the `true` probe → pane death → quiet sampling) and says which it used. The wait
+engine also speaks regex (`--until`, plus `--since-send` so a stale anchor can't
+satisfy it), quiet detection (`--quiet-ms`), pane death (`--exit`),
+AND-composition, and SGR mouse (`click X Y`); `send` handles debounced key
+rhythms (`--repeat N --delay S`); `screen --find` turns text into 1-based
+click-ready coordinates; `replay --at 3.5` rebuilds the screen as it was at any
+earlier moment; `clear` reclaims the pane before the next capture costs you
+again; and every observation reports what it cost your context.
 
 **Detailed docs:** [docs/en/usage.md](docs/en/usage.md) — the agent-facing usage guide:
 mental model, decision tables, worked examples, common mistakes, red lines.
@@ -104,10 +109,13 @@ under `$XDG_STATE_HOME/term-use/<session>/` — `raw.log` (asciicast v2 evidence
 store) and `state.json` (atomic locator/recorder state, with `last_send_offset` as a
 **byte offset** into `raw.log`, so echo can never fake completion).
 
-Key internal guarantees: text/keys never mixed in one `send-keys` call; `--hex`
-split one byte per `-H`; OSC 133 A/B/C/D state machine tolerates chunk boundaries;
-composite verdicts take the weakest member's confidence; every failure surfaces as a
-fixed-code `TDError`, single-line JSON, exit code 1.
+Key internal guarantees: the recorder is attached **before** the target runs, so a
+program that prints immediately does not lose its first bytes; tmux success is never
+read from the exit code alone (it can fail and exit 0); text/keys never mixed in one
+`send-keys` call; `--hex` split one byte per `-H`; the OSC 133 A/B/C/D state machine
+tolerates chunk boundaries and also reads VSCode's 633; composite verdicts take the
+weakest member's confidence; every failure surfaces as a fixed-code `TDError`,
+single-line JSON, exit code 1.
 
 ## Testing
 
