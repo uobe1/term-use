@@ -74,6 +74,24 @@ def test_until_regex_serializes_its_scope():
     assert waiting.UntilRegex("x").to_json(True)["scope"] == "screen"
 
 
+def test_shell_that_runs_a_script_is_the_program():
+    """`bash script.sh` / `sh -c '…'` exit with their work: pane death is the
+    fact oracle there, and the old name-only match used to steal the argument."""
+    assert waiting.shell_owns_the_pane("bash") is True
+    assert waiting.shell_owns_the_pane("/bin/bash -i") is True
+    assert waiting.shell_owns_the_pane("bash --rcfile /tmp/rc -i") is True
+    assert waiting.shell_owns_the_pane("zsh") is True
+    assert waiting.shell_owns_the_pane("bash /tmp/paint.sh") is False
+    assert waiting.shell_owns_the_pane("sh -c 'sleep 1'") is False
+    assert waiting.shell_owns_the_pane("bash -c x") is False
+    assert waiting.program_is_pane("bash /tmp/paint.sh") is True
+    assert waiting.program_is_pane("bash") is False
+    assert waiting.program_is_pane("nano") is True
+    # the oracle for a script-runner is pane death, not quiet sampling
+    st = {"shell_integration": False, "cmd": "bash /tmp/paint.sh"}
+    assert waiting.choose_done_oracle(st) == "pane-exit"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

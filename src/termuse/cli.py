@@ -99,12 +99,21 @@ def cmd_start(args) -> int:
                       hint="pick another -n name or stop the existing session")
     writer = records.V2Writer.fresh(args.name, args.width, args.height,
                                     args.cmd, args.socket)
-    # Shell integration: bash sessions get an injected rcfile (OSC 133).
+    # Shell integration: an *interactive* bash gets the injected rcfile
+    # (OSC 133). Matching only the program name used to silently swallow
+    # `--cmd "bash script.sh"` — the script argument vanished and a bare shell
+    # took its place. Anything that is not a plain interactive bash (a script
+    # operand, a `-c` command string, or the operator's own --rcfile) is left
+    # exactly as asked for.
     cmd = args.cmd
-    if cmd.split()[0].endswith("bash"):
+    words = cmd.split()
+    base = words[0].rsplit("/", 1)[-1] if words else ""
+    owns_rc = "--rcfile" in words or "--init-file" in words
+    if base == "bash" and waiting.shell_owns_the_pane(cmd) and not owns_rc:
         rc = writer.dir / "bashrc"
         rc.write_text(rcfile.bashrc_template())
-        cmd = f"bash --rcfile {shlex.quote(str(rc))} -i"
+        extra = "".join(f" {shlex.quote(w)}" for w in words[1:])
+        cmd = f"{words[0]} --rcfile {shlex.quote(str(rc))} -i{extra}"
         writer.state["shell_integration"] = True
         writer.save_state()
     # remain-on-exit must be set *inside* the pane before exec: short-lived
@@ -576,9 +585,17 @@ def cmd_screenshot(args) -> int:
     pane = tmuxio.meta(target)
     cols = pane.get("pane_width") or (state or {}).get("width")
     rows = pane.get("pane_height") or (state or {}).get("height")
+    cursor = None
+    if args.cursor and isinstance(pane.get("cursor_x"), int) \
+            and isinstance(pane.get("cursor_y"), int):
+        # Where the pane says the cursor is: "which row am I on" is a layout
+        # question, and an outline answers it without hiding the glyph.
+        cursor = (pane["cursor_x"], pane["cursor_y"])
     grid = tdscreen.parse_grid(tmuxio.capture(target, ("-N", "-e")))
     try:
-        info = tdscreenshot.render(grid, out_path, args.format, cols=cols, rows=rows)
+        info = tdscreenshot.render(grid, out_path, args.format, cols=cols,
+                                   rows=rows, cursor=cursor,
+                                   font_size=args.font_size)
     except ImportError:
         raise TDError("pillow-missing",
                       "Pillow is required for the image channel",
@@ -785,6 +802,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--out", dest="o", default=None, metavar="PATH",
                    help="output file (default: numbered file beside the "
                         "session's evidence; never overwrites an earlier shot)")
+    p.add_argument("--font-size", type=int, default=16, metavar="PX",
+                   help="glyph size in px — bigger is easier to read but the "
+                        "image costs more context (default 16)")
+    p.add_argument("--no-cursor", dest="cursor", action="store_false",
+                   help="omit the cursor outline (default: outline it, so "
+                        "'which row am I on' is answerable from the picture)")
+    p.set_defaults(cursor=True)
     p.set_defaults(func=cmd_screenshot)
 
     p = sub.add_parser("clear", help="reclaim the pane's screen + scrollback "

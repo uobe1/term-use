@@ -250,6 +250,39 @@ class ShellReady(Condition):
 
 SHELL_COMMANDS = ("bash", "sh", "dash", "zsh", "ksh", "fish", "csh", "tcsh",
                   "login", "shell")
+# Flags that consume the token after them, so a script operand is not mistaken
+# for one of their values.
+_SHELL_FLAGS_WITH_ARG = ("--rcfile", "--init-file", "-O", "--optimize-environment")
+
+
+def shell_owns_the_pane(cmd: str | None) -> bool:
+    """True for an interactive shell invocation (it outlives every command).
+
+    `bash` / `zsh -i` stay alive forever, so pane death says nothing about
+    whether a command finished. `bash script.sh` and `sh -c '...'` are the
+    program itself: they exit when the work does, so pane death IS the fact.
+    """
+    words = str(cmd or "").split()
+    if not words:
+        return False
+    base = words[0].rsplit("/", 1)[-1]
+    if not any(base == s or base.startswith(s + "-") for s in SHELL_COMMANDS):
+        return False
+    if "-c" in words or "-ic" in words or any(w.startswith("-c") and len(w) > 2
+                                              for w in words[1:]):
+        return False  # ran a command string, then exits
+    rest = words[1:]
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w in _SHELL_FLAGS_WITH_ARG:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        return False  # a bare operand: a script file
+    return True
 
 
 def program_is_pane(cmd: str | None) -> bool:
@@ -259,11 +292,13 @@ def program_is_pane(cmd: str | None) -> bool:
     so `wait --exit` is the fact-level oracle; in a shell pane the pane never
     dies and completion has to come from the shell protocol.
     """
-    prog = str(cmd or "").strip().split(" ")
-    base = prog[0].rsplit("/", 1)[-1] if prog and prog[0] else ""
+    words = str(cmd or "").split()
+    if not words:
+        return False
+    base = words[0].rsplit("/", 1)[-1]
     if not base:
         return False
-    return not any(base == s or base.startswith(s + "-") for s in SHELL_COMMANDS)
+    return not shell_owns_the_pane(cmd)
 
 
 def choose_done_oracle(state: dict | None) -> str:

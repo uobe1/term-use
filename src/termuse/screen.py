@@ -45,7 +45,7 @@ def cell_width(ch: str) -> int:
 # OSC (BEL- or ST-terminated), CSI (incl. private `?` modes), designations,
 # and any other two-char escape. Used to size a capture honestly (escape
 # bytes are not context an agent pays for) and to regex the raw stream.
-_ESCAPES = re.compile(
+ESCAPES = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC .. BEL | ST
     r"|\x1b\[[0-9;:]*[0-9;:?]*[A-Za-z~]"      # CSI ... final byte
     r"|\x1b[()][0-9A-Za-z]"                    # charset designation
@@ -53,9 +53,14 @@ _ESCAPES = re.compile(
 )
 
 
+def strip_escapes(text: str) -> str:
+    """Escape sequences out, control characters kept."""
+    return ESCAPES.sub("", text)
+
+
 def visible_text(text: str) -> str:
     """Strip escape sequences and CR, keep line structure."""
-    return _ESCAPES.sub("", text).replace("\r", "")
+    return strip_escapes(text).replace("\r", "")
 
 
 def color_name(n: int) -> str | int:
