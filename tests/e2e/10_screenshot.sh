@@ -13,6 +13,14 @@ cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; 
 trap cleanup EXIT
 fail() { echo "E2E-10 FAIL: $*"; exit 1; }
 
+# Prerequisites: a scenario target and the optional image dependency. Skip
+# honestly on a box missing either, rather than report a product failure for
+# something that was never installed. (TERM_USE_DISABLE_IMAGE=1 isolation of
+# the pillow-missing path is exercised below regardless.)
+command -v nano >/dev/null || { echo "E2E-10 SKIP: nano not installed"; exit 0; }
+python3 -c 'import PIL' 2>/dev/null \
+  || { echo "E2E-10 SKIP: Pillow not installed (uv pip install pillow)"; exit 0; }
+
 $TD start -n td10 --cmd bash --socket "$SOCK" --width 100 --height 30 >/dev/null \
   || fail "start failed"
 printf 'hello screenshot\nline two\n' > "$TMP/hello.txt"

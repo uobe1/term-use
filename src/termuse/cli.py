@@ -9,9 +9,11 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+from termuse import budget as tdbudget
 from termuse import input as tdinput
 from termuse import rcfile, records, screen as tdscreen
 from termuse import screenshot as tdscreenshot
@@ -37,9 +39,17 @@ def resolve_target(name: str, socket: str | None = None) -> tmuxio.Target:
     elif t.socket is None:
         try:
             sock = records.read_state(t.session).get("socket")
-        except TDError:
-            if tmuxio.tmux("has-session", "-t", t.session).returncode != 0:
-                raise  # not on the default server either: keep the rich hint
+        except TDError as e:
+            if not tmuxio.ok(tmuxio.tmux("has-session", "-t", t.session)):
+                # Most common real cause: the session lives on another tmux
+                # socket and was addressed by its bare name. Say so — the
+                # XDG_STATE_HOME hint alone sends agents hunting the wrong file.
+                raise TDError(
+                    e.code, e.message,
+                    hint=(e.hint or "") + " If the session runs on a named tmux "
+                         "socket, address it as sock:name[:win.pane] or pass "
+                         "--socket NAME; see what exists with: term-use "
+                         "sessions --socket NAME")
             sock = None  # exists unmanaged on the default server
         t = tmuxio.Target(sock, t.session, t.window, t.pane)
     return t
@@ -57,19 +67,33 @@ def cmd_sessions(args) -> int:
                       "#{session_name}|#{session_windows}|#{session_attached}",
                       socket=args.socket)
     rows = []
-    if res.returncode == 0:
+    if tmuxio.ok(res):
         for line in res.stdout.splitlines():
             parts = line.split("|")
             if len(parts) >= 1 and parts[0]:
                 rows.append({"name": parts[0],
                              "windows": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
                              "attached": parts[2:] and parts[2] == "1"})
+    else:
+        # "no server running" is an honest empty list; anything else tmux
+        # complains about must surface, not be reported as an empty room.
+        msg = (res.stderr or "").strip()
+        low = msg.lower()
+        if "no server running" in low or "no sessions" in low:
+            rows = []
+        else:
+            code, hint = tmuxio.classify(res)
+            raise TDError(code, msg or f"tmux failed (exit {res.returncode})",
+                          hint=hint)
     print(json.dumps(rows, ensure_ascii=False))
     return 0
 
 
 def cmd_start(args) -> int:
-    if tmuxio.tmux("has-session", "-t", args.name, socket=args.socket).returncode == 0:
+    if tmuxio.ok(tmuxio.tmux("has-session", "-t", args.name, socket=args.socket)):
+        # ok(), not returncode: a tmux client that cannot reach its server can
+        # exit 0 with an error on stderr, and "already exists" would be a lie
+        # that sends agents off to kill a session that is not there.
         raise TDError("session-missing",
                       f"session {args.name!r} already exists",
                       hint="pick another -n name or stop the existing session")
@@ -201,13 +225,29 @@ def cmd_screen(args) -> int:
     if args.meta:
         state = load_state_or_none(target.session)
         m = tmuxio.meta(target)
+        text = tmuxio.capture(target, ("-N", "-e"))
+        stats = tdscreen.grid_stats(tdscreen.parse_grid(text))
+        ctx = tdbudget.text_context(tdscreen.visible_text(text))
         m.update(session=target.session,
                  pane_id=state.get("pane_id") if state else None,
-                 managed=state is not None)
+                 managed=state is not None,
+                 blank=stats["blank"], cells=stats["painted_cells"],
+                 nonblank_rows=stats["nonblank_rows"], context=ctx)
+        if state is not None:
+            # Stall diagnostics (tester feedback): "no new output" and "my
+            # input never reached the program" look identical on screen.
+            m["last_output_age_s"] = records.output_age_s(target.session)
+            m["unexecuted_input"] = records.pending_input(
+                target.session, state.get("last_send_offset", 0))
+        else:
+            m["last_output_age_s"] = None
+            m["unexecuted_input"] = None
+            m["degraded"] = "unmanaged"
         print(json.dumps(m, ensure_ascii=False))
+        tdbudget.warn(ctx, target.session)
         return 0
     flags = []
-    if args.keep_trailing:
+    if args.keep_trailing or args.text:
         flags.append("-N")
     if args.join:
         flags.append("-J")
@@ -219,23 +259,37 @@ def cmd_screen(args) -> int:
         grid = tdscreen.parse_grid(text)
         if args.element_at is not None:
             x, y = args.element_at
-            print(json.dumps(tdscreen.cell_at(grid, x, y), ensure_ascii=False))
+            out = json.dumps(tdscreen.cell_at(grid, x, y), ensure_ascii=False)
         elif args.grid:
-            print(json.dumps(grid, ensure_ascii=False))
+            out = json.dumps(grid, ensure_ascii=False)
         elif args.runs:
-            print(json.dumps(tdscreen.rows_to_runs(grid), ensure_ascii=False))
+            out = json.dumps(tdscreen.rows_to_runs(grid), ensure_ascii=False)
         elif args.grep:
             if args.fg is None and args.bg is None and not args.attr:
                 raise TDError("invalid-arguments",
                               "--grep needs at least one of --fg/--bg/--attr")
-            for row in grid:
-                if tdscreen.row_matches(row, args.fg, args.bg, args.attr or ()):
-                    print(tdscreen.grid_row_text(row))
-        elif args.find is not None:
-            print(json.dumps(tdscreen.find_text(grid, args.find),
-                             ensure_ascii=False))
+            out = "".join(tdscreen.grid_row_text(row) + "\n"
+                          for row in grid
+                          if tdscreen.row_matches(row, args.fg, args.bg,
+                                                  args.attr or ()))
+        else:
+            out = json.dumps(tdscreen.find_text(grid, args.find),
+                             ensure_ascii=False)
+        print(out, end="")
+        tdbudget.warn(tdbudget.text_context(out), target.session)
         return 0
-    print(tmuxio.capture(target, tuple(flags)), end="")
+    text = tmuxio.capture(target, tuple(flags))
+    # A silent all-whitespace answer is the failure mode the tester reported:
+    # "is the pane empty, or did my read fail?" Say which it is (on stderr, so
+    # piping stdout into grep stays exact).
+    stats = tdscreen.text_stats(text)
+    if stats["nonblank_lines"] == 0:
+        print(f"note: pane shows no text ({stats['lines']} lines, none with "
+              f"content) — this is an empty screen, not a failed read; run "
+              f"`screen -n {target.session} --meta` for last_output_age_s / "
+              f"unexecuted_input", file=sys.stderr)
+    print(text, end="")
+    tdbudget.warn(tdbudget.text_context(text), target.session)
     return 0
 
 
@@ -271,6 +325,18 @@ def require_shell_integration(target: tmuxio.Target, state: dict | None) -> dict
                       f"session {target.session!r} has no OSC 133 injection",
                       hint="start with --cmd bash to get shell integration")
     return state
+
+
+def _with_context(ctx, cond) -> dict:
+    """Timeout evidence plus its price tag.
+
+    The numbers ride inside the JSON rather than as a stderr warning: on the
+    failure path stderr must stay single-line JSON, which is what every
+    consumer of `{"error":…}` parses.
+    """
+    ev = waiting.timeout_evidence(ctx, cond)
+    ev["context"] = tdbudget.text_context(ev.get("screen") or "")
+    return ev
 
 
 def cmd_wait(args) -> int:
@@ -339,12 +405,15 @@ def cmd_wait(args) -> int:
                 screen = capture(0)
             except TDError:
                 screen = None  # pane/session just vanished (unmanaged --exit)
+            verdict_ctx = tdbudget.text_context(screen or "")
             print(json.dumps({
                 "verdict": "met",
                 "confidence": cond.confidence,
                 **cond.to_json(True),
                 "evidence": {"screen": screen},
+                "context": verdict_ctx,
             }, ensure_ascii=False))
+            tdbudget.warn(verdict_ctx, target.session)
             return 0
         # EOF early-termination: a dead pane can never satisfy --until or
         # --cmd-done, so fail immediately instead of burning the timeout.
@@ -368,11 +437,11 @@ def cmd_wait(args) -> int:
                            "evidence.screen, send the program's quit key, then "
                            "re-probe; if the shell was still starting, retry "
                            "with a longer --timeout",
-                      evidence=waiting.timeout_evidence(ctx, cond))
+                      evidence=_with_context(ctx, cond))
     raise TDError("timeout",
                   f"conditions not met within {args.timeout}s",
                   hint=waiting.timeout_hint(cond),
-                  evidence=waiting.timeout_evidence(ctx, cond))
+                  evidence=_with_context(ctx, cond))
 
 
 def cmd_resize(args) -> int:
@@ -407,8 +476,26 @@ def cmd_click(args) -> int:
     return 0
 
 
+def default_shot_path(session: str, fmt: str, managed: bool) -> str:
+    """Where a screenshot goes when -o is omitted.
+
+    Managed sessions keep their pictures beside their evidence; unmanaged
+    targets must not grow a record directory as a side effect of being looked
+    at, so those land in the temp dir. Numbered, never overwritten: two
+    captures of the same pane are how an agent compares frames.
+    """
+    d = records.session_dir(session) if managed else Path(tempfile.gettempdir())
+    if managed:
+        d.mkdir(parents=True, exist_ok=True)
+    n = 1
+    path = d / f"screenshot-{n}.{fmt}"
+    while path.exists():
+        n += 1
+        path = d / f"screenshot-{n}.{fmt}"
+    return str(path)
+
+
 def cmd_screenshot(args) -> int:
-    import os
     if os.environ.get("TERM_USE_DISABLE_IMAGE") == "1":
         # Blind-test switch: heuristics-only testers get the image channel
         # denied with the same structured error shape as a missing Pillow.
@@ -416,16 +503,68 @@ def cmd_screenshot(args) -> int:
                       "image channel disabled by TERM_USE_DISABLE_IMAGE=1",
                       hint="this session runs heuristics-only; use the text channels")
     target = resolve_target(args.name, getattr(args, "socket", None))
-    text = tmuxio.capture(target, ("-e",))
-    grid = tdscreen.parse_grid(text)
+    state = load_state_or_none(target.session)
+    out_path = args.o or default_shot_path(target.session, args.format,
+                                           state is not None)
+    # Geometry comes from tmux, not from the capture: a screen that painted
+    # nothing has no content bounds, and cropping to nothing used to crash
+    # the renderer. -N keeps trailing cells so a painted background survives
+    # to the picture (tmux strips them by default).
+    pane = tmuxio.meta(target)
+    cols = pane.get("pane_width") or (state or {}).get("width")
+    rows = pane.get("pane_height") or (state or {}).get("height")
+    grid = tdscreen.parse_grid(tmuxio.capture(target, ("-N", "-e")))
     try:
-        info = tdscreenshot.render(grid, args.o, args.format)
+        info = tdscreenshot.render(grid, out_path, args.format, cols=cols, rows=rows)
     except ImportError:
         raise TDError("pillow-missing",
                       "Pillow is required for the image channel",
                       hint="pkg install python-pillow (or: pip install Pillow)")
-    print(json.dumps({"ok": True, "format": args.format, **info},
-                     ensure_ascii=False))
+    ctx = tdbudget.image_context(info["path"], info["size"])
+    print(json.dumps({"ok": True, "format": args.format, **info,
+                      "context": ctx}, ensure_ascii=False))
+    tdbudget.warn(ctx, target.session, channel="image")
+    return 0
+
+
+def cmd_clear(args) -> int:
+    """Reclaim the pane's screen and scrollback — the way out of a fat capture.
+
+    An agent that just paid 4k tokens for a screen dump pays it again on every
+    later read, because `capture-pane` shows whatever is on the screen and its
+    history. This is the one command whose whole purpose is making the *next*
+    capture cheaper.
+    """
+    target = resolve_target(args.name, getattr(args, "socket", None))
+    state = load_state_or_none(target.session)
+    writer = records.V2Writer(target.session) if state else None
+
+    def rows_visible() -> int:
+        grid = tdscreen.parse_grid(tmuxio.capture(target, ("-N", "-e")))
+        return tdscreen.grid_stats(grid)["nonblank_rows"]
+
+    before = rows_visible()
+    did: list[str] = []
+    if not args.history_only:
+        # C-l is the keystroke a shell/readline already binds to clear-display:
+        # it repaints the prompt without executing anything, unlike typing
+        # `clear` + Enter (which would run a command and pollute history).
+        events = tdinput.send(target, [], ["C-l"], [])
+        if writer is not None:
+            writer.append("i", events)
+        did.append("C-l")
+    tmuxio.require(tmuxio.tmux("clear-history", "-t", target.to_arg(),
+                               socket=target.socket), "session-missing")
+    did.append("clear-history")
+    after = rows_visible()
+    result = {"ok": True, "cleared": did, "rows_before": before, "rows_after": after,
+              "history_size": tmuxio.meta(target).get("history_size")}
+    if after >= before and not args.history_only:
+        result["note"] = ("the screen still holds its content — a full-screen "
+                          "program repaints on its own or does not bind C-l; "
+                          "scrollback is gone. Pass --history-only to avoid "
+                          "touching the program's input at all.")
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -533,6 +672,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
     p.add_argument("--meta", action="store_true", help="pane status JSON (cursor/modes/history)")
     p.add_argument("-N", "--keep-trailing", action="store_true", help="keep trailing spaces")
+    p.add_argument("--text", action="store_true",
+                   help="plain text, the default reading — accepted so "
+                        "`screen --text` is a valid guess, not an argparse error")
     p.add_argument("-J", "--join", action="store_true", help="join wrapped lines into logical lines")
     p.add_argument("--scrollback", type=int, metavar="N", help="include N lines of history")
     p.add_argument("--grid", action="store_true", help="SGR cell grid JSON")
@@ -568,8 +710,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", "--name", required=True, help="session name (or target)")
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
     p.add_argument("--format", choices=["png", "jpg"], default="png")
-    p.add_argument("-o", required=True, metavar="PATH", help="output file path")
+    p.add_argument("-o", "--out", dest="o", default=None, metavar="PATH",
+                   help="output file (default: numbered file beside the "
+                        "session's evidence; never overwrites an earlier shot)")
     p.set_defaults(func=cmd_screenshot)
+
+    p = sub.add_parser("clear", help="reclaim the pane's screen + scrollback "
+                                     "(keeps later captures cheap)")
+    p.add_argument("-n", "--name", required=True, help="session name (or target)")
+    p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
+    p.add_argument("--history-only", action="store_true",
+                   help="drop only the scrollback; inject no keystroke at all")
+    p.set_defaults(func=cmd_clear)
 
     p = sub.add_parser("resize", help="resize the session's window (forces redraw)")
     p.add_argument("-n", "--name", required=True, help="session name (or target)")

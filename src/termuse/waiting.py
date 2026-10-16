@@ -254,7 +254,7 @@ class ExitCondition(Condition):
                 raise
             return self._meet_collapsed()  # server gone: pane certainly gone
         if m.get("pane_dead"):
-            signal = m.get("pane_dead_signal")
+            signal = m.get("pane_dead_signal_name") or m.get("pane_dead_signal")
             if signal:
                 raise TDError(
                     "pane-dead-by-signal",
@@ -286,7 +286,7 @@ class ExitCondition(Condition):
 def pane_dead_error(ctx) -> TDError:
     """Unexpected pane death during a wait that wasn't --exit (EOF early-termination)."""
     m = ctx.meta()
-    signal = m.get("pane_dead_signal")
+    signal = m.get("pane_dead_signal_name") or m.get("pane_dead_signal")
     if signal:
         return TDError(
             "pane-dead-by-signal",

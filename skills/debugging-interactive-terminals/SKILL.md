@@ -40,7 +40,7 @@ CLI: `term-use` (after install) or `PYTHONPATH=<repo>/src python3 -m termuse` (o
 | `wait -n N --exit [--expect-code N]` | pane exit / death, signal name in evidence (fact) |
 | `wait -n N --until 'regex' [--scrollback N]` | screen regex (inference; rstrip self-heal for trailing spaces) |
 | `wait -n N --quiet-ms 800` | screen stable for N ms (heuristic; animation-immune) |
-| `screenshot -n N --format png -o p.png` | image channel via Pillow |
+| `screenshot -n N --format png -o p.png` | image channel via Pillow + a monospace font (probes Android/Termux then `/usr/share/fonts` etc.; force one with `TERM_USE_FONT=/path/Mono.ttf`; no Pillow → `pillow-missing`, no font → `font-missing` — both structured, and no other channel needs either) |
 | `mouse-detect -n N` / `click -n N X Y` | mouse mode (SGR) / click at 1-based coords |
 | `fix-tty -n N` | restore sane terminal (stty sane) after ECHO damage |
 | `trace -n N [--format json]` | project raw.log: input/output/sync events |

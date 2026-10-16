@@ -7,6 +7,9 @@ ERROR_CODES = (
     # CLI argument validation failure (--repeat < 1, bad hex, unknown key, ...).
     "invalid-arguments",
     "socket-unreachable",
+    # tmux reported a failure we could not fingerprint (nonzero exit or error
+    # text on stderr); its own message rides along so the case stays diagnosable.
+    "tmux-failed",
     "pane-dead",
     "pane-dead-by-signal",
     "no-shell-integration",
@@ -22,6 +25,9 @@ ERROR_CODES = (
     "tty-echo-broken",
     # Image channel: Pillow unavailable (or disabled via env switch).
     "pillow-missing",
+    # Image channel: no monospace font to draw the cell grid with
+    # (also raised when TERM_USE_FONT points at a nonexistent file).
+    "font-missing",
 )
 
 
