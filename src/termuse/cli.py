@@ -116,6 +116,17 @@ def cmd_start(args) -> int:
         cmd = f"{words[0]} --rcfile {shlex.quote(str(rc))} -i{extra}"
         writer.state["shell_integration"] = True
         writer.save_state()
+    elif base == "zsh" and waiting.shell_owns_the_pane(cmd):
+        # A ZDOTDIR of our own that sources the user's files first, so their
+        # .zshrc, their precmd() and their history location all survive.
+        zd = writer.dir / "zdotdir"
+        zd.mkdir(parents=True, exist_ok=True)
+        for fname, body in rcfile.zsh_integration_files().items():
+            (zd / f".{fname}").write_text(body)   # zsh wants the leading dot
+        extra = "".join(f" {shlex.quote(w)}" for w in words[1:])
+        cmd = f"env ZDOTDIR={shlex.quote(str(zd))} {words[0]}{extra}"
+        writer.state["shell_integration"] = True
+        writer.save_state()
     # remain-on-exit must be set *inside* the pane before exec: short-lived
     # commands would otherwise die (and take the session with them) before the
     # external set-option lands.
@@ -358,9 +369,24 @@ def require_shell_integration(target: tmuxio.Target, state: dict | None) -> dict
                  f"XDG_STATE_HOME consistent between start and wait, or "
                  f"start with: term-use start -n {target.session} --cmd bash")
     if not state.get("shell_integration"):
-        raise TDError("no-shell-integration",
-                      f"session {target.session!r} has no OSC 133 injection",
-                      hint="start with --cmd bash to get shell integration")
+        # `start` can only record what it injected itself. A shell that emits
+        # the markers on its own (fish >= 4.0) or carries another tool's
+        # integration (VSCode's OSC 633, WezTerm's 133) is equally good
+        # evidence — believe the stream, not the launch-time guess.
+        if records.detect_shell_integration(target.session, wait_s=1.5):
+            state["shell_integration"] = True
+            writer = records.V2Writer(target.session)
+            writer.state = state
+            writer.save_state()
+        else:
+            raise TDError(
+                "no-shell-integration",
+                f"session {target.session!r} emits no OSC 133 command markers",
+                hint="start with --cmd bash or --cmd zsh to get the injected "
+                     "integration (fish >= 4.0 emits the markers itself); "
+                     "plain sh/dash has no pre-exec hook, so a done-marker is "
+                     "not obtainable there — wait on the program's own output "
+                     "with --until, or on pane death with --exit")
     return state
 
 

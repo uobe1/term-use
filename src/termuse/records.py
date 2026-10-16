@@ -127,6 +127,39 @@ def output_age_s(session: str) -> float | None:
     return max(0.0, round(time.time() - head["timestamp"] - last, 2))
 
 
+# raw.log stores the stream as JSON strings, and JSON escapes control characters
+# even with ensure_ascii=False — so on disk the marker reads `\u001b]133;A`, not
+# the raw byte. Match both spellings rather than betting on which one appears.
+_MARKERS = tuple(
+    f"{esc}]{code};{letter}".encode()
+    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "ABCD")
+
+
+def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
+    """Has this pane actually emitted command markers? Evidence, not assumption.
+
+    `start` can only know what it injected itself; fish >= 4.0 emits OSC 133
+    natively and a user's zsh/bash may carry VSCode's (633) or WezTerm's (133)
+    integration. Refusing those sessions was a portability hole — the strongest
+    evidence the tool offers was gated on a guess made at launch time.
+    """
+    path = session_dir(session) / "raw.log"
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - 65536))
+            chunk = fh.read()
+        if any(m in chunk for m in _MARKERS):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
 def pending_input(session: str, since_offset: int) -> str | None:
     """Text injected after the last Enter — the "half-typed line" signal.
 
