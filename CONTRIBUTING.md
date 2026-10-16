@@ -18,6 +18,31 @@ Open a [GitHub issue](https://github.com/uobe1/term-use/issues) and include:
 Feature requests are also issues — please describe the scenario you are driving
 (program, what you need to observe) rather than the API you imagine.
 
+## Version numbering
+
+Format `vX.Y[.Z]aN` / `vX.Y[.Z]bN` / `vX.Y[.Z]`, where `X` is the major version and
+`Y` the minor one. The suffix says what kind of build it is:
+
+| Suffix | Meaning | Release posture |
+|---|---|---|
+| `aN` | **alpha** — early test line (like an Intel ES chip): rough, changes freely, expected to break | never tagged as a GitHub release |
+| `bN` | **beta** — final test line (Intel QS): feature-complete candidate, only fixes | tagged when promoted |
+| none | **formal** — the released version | tagged, GitHub release |
+
+`N` counts iterations within that line and resets when `X.Y` advances
+(`2.0.0a9` → `2.1.0a1`). `pyproject.toml` carries the same number without the `v`
+(`2.0.0a3`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
+
+**Three lines, three branches** — alpha, beta, and formal advance independently; they
+are *not* force-synced. Routing:
+
+- New PRs land on the **alpha** line by default: it is where the most breakage is
+  expected, so unbaked changes go there first.
+- Work that has been **verified** in real use graduates to the **beta** line.
+- Only what has **survived beta** becomes a formal `feature` release.
+
+Cherry-pick forward (alpha → beta → formal); never rewrite a line the other way.
+
 ## Development workflow
 
 0. **Local setup** — the source tree runs without any install step:
