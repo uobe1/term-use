@@ -1,0 +1,226 @@
+"""Reconstructing what the screen showed, from the recorded bytes.
+
+Two engines, because they answer different questions:
+
+  `linear()`   cheap, no server contact. Strip the escape sequences and honour
+               \\r/\\n, so a command's output reads as the text it was. Honest
+               for line-oriented programs; a full-screen program positions its
+               glyphs with cursor moves, which a linear reader cannot follow —
+               `looks_redrawn()` says when that happened instead of letting the
+               text quietly lie.
+
+  `frame()`    exact. Feed the recorded bytes back through **tmux itself**, in
+               a throwaway pane on a private socket, and capture what it paints.
+               tmux is the emulator that produced the recording, so there is no
+               second implementation to disagree with — which is why this is
+               here instead of pyte (measured: pyte diverges from tmux on 8 of
+               23 modern sequences, including no alt-screen at all, and drops
+               data on ZWJ emoji).
+
+The scratch pane runs `stty raw -echo; cat`: writing to a pane's tty delivers
+bytes to the program's *stdin*, so something inside has to echo them back out
+as real output, and `-echo` keeps the line discipline from doubling them.
+"""
+import os
+import time
+
+from termuse import records, screen, tmuxio
+from termuse.errors import TDError
+
+# Sequences that mean "this program redraws the screen" rather than "it prints
+# lines": alt-screen, explicit cursor addressing, or erase-in-display.
+_REDRAW_MARKERS = ("\x1b[?1049h", "\x1b[?47h", "\x1b[?1047h", "\x1b[H",
+                   "\x1b[2J", "\x1b[1;")
+
+
+def strip_escapes(text: str) -> str:
+    """Escape sequences out, \\r and \\n kept (they carry the layout)."""
+    return screen.strip_escapes(text)
+
+
+def looks_redrawn(raw: str) -> bool:
+    return any(m in raw for m in _REDRAW_MARKERS)
+
+
+def linear(raw: str) -> str:
+    """Byte stream -> the text a line-oriented program put on screen.
+
+    A \\r rewinds the column and later characters overwrite what was there, so
+    a progress bar collapses to its final state instead of becoming one long
+    line of stale frames.
+    """
+    text = strip_escapes(raw)
+    lines: list[list[str]] = [[]]
+    col = 0
+
+    def put(ch_or_space: str) -> None:
+        nonlocal col
+        line = lines[-1]
+        while len(line) <= col:
+            line.append(" ")
+        line[col] = ch_or_space
+        col += 1
+
+    for ch in text:
+        if ch == "\n":
+            lines.append([])
+            col = 0
+        elif ch == "\r":
+            col = 0
+        elif ch == "\t":
+            for _ in range(8 - col % 8):
+                put(" ")
+        elif ch == "\x08":
+            col = max(0, col - 1)         # backspace moves, it does not delete
+        elif ch in ("\x00", "\x07"):
+            continue
+        else:
+            put(ch)
+    return "\n".join("".join(l).rstrip() for l in lines).rstrip("\n")
+
+
+def trim(text: str, max_bytes: int) -> tuple[str, int]:
+    """Head + tail within a byte budget, with the elision marked.
+
+    The marker is the point: an agent that silently receives half a log cannot
+    tell truncation from a program that stopped printing.
+    """
+    raw = text.encode("utf-8", "replace")
+    if not max_bytes or len(raw) <= max_bytes:
+        return text, 0
+    half = max(1, max_bytes // 2)
+    omitted = len(raw) - 2 * half
+    marker = (f"\n[... term-use: limited to {max_bytes} bytes, {omitted} "
+              f"interior bytes omitted (--max-bytes 0 for everything) ...]\n")
+    head = raw[:half].decode("utf-8", "replace")
+    tail = raw[-half:].decode("utf-8", "replace")
+    return head + marker + tail, omitted
+
+
+def _segments(session: str, offset: int | None, elapsed: float | None):
+    """Recorded output split at resize points: [(text, (cols, rows) | None)].
+
+    A resize reflows what is already on the screen, so replaying it out of
+    order would paint a different frame than the one that was recorded.
+    """
+    items: list[tuple] = []
+    for ts, code, data, pos in records.events_since(session, 0):
+        if elapsed is not None and ts > elapsed:
+            break
+        if offset is not None and pos < offset:
+            continue
+        if code == "o" and isinstance(data, str):
+            items.append(("o", data))
+        elif code == "r" and isinstance(data, dict):
+            items.append(("r", data.get("cols"), data.get("rows")))
+    segs: list[tuple[str, tuple | None]] = []
+    buf, geom = "", None
+    for it in items:
+        if it[0] == "o":
+            buf += it[1]
+        else:
+            if buf:
+                segs.append((buf, geom))
+                buf = ""
+            geom = (it[1], it[2])
+    if buf:
+        segs.append((buf, geom))
+    return segs
+
+
+def resolve_at(session: str, at: str) -> tuple[dict, float | None, int | None]:
+    """`--at` accepts elapsed seconds, `offset:N`, `last-send` or `start`."""
+    state = records.read_state(session)
+    head = records.header(session) or {}
+    if at in ("last-send", "send"):
+        return head, None, int(state.get("last_send_offset", 0))
+    if at == "start":
+        return head, None, 0
+    if at.startswith("offset:"):
+        try:
+            return head, None, int(at.split(":", 1)[1])
+        except ValueError:
+            raise TDError("invalid-arguments", f"--at {at!r}: offset must be an integer")
+    try:
+        return head, float(at), None
+    except ValueError:
+        raise TDError(
+            "invalid-arguments",
+            f"--at {at!r} is not a number of seconds, offset:N, start or last-send",
+            hint="seconds are measured from the session start recorded in "
+                 "raw.log's header; `trace -n NAME` prints them per event")
+
+
+def frame(session: str, *, elapsed: float | None = None, offset: int | None = None,
+          cols: int = 80, rows: int = 24, settle_s: float = 5.0) -> str:
+    """The pane's own `capture-pane -e` output after replaying up to a point."""
+    segs = _segments(session, offset, elapsed)
+    total = sum(len(s[0]) for s in segs)
+    sock = f"tu-replay-{os.getpid()}"
+    try:
+        res = tmuxio.tmux("new-session", "-d", "-s", "rp", "-x", str(cols),
+                          "-y", str(rows),
+                          "sh -c 'stty raw -echo; exec cat'", socket=sock)
+        tmuxio.require(res, "socket-unreachable")
+        # Wait for `cat` to be running before writing: bytes that arrive while
+        # the outer `sh` is still executing stty/exec get eaten by a process
+        # that is about to be replaced, which shows up as a frame that silently
+        # lost its beginning.
+        ready = time.monotonic() + settle_s
+        while True:
+            cur = tmuxio.tmux("display-message", "-p", "-t", "rp",
+                              "-F", "#{pane_current_command}", socket=sock)
+            if "cat" in cur.stdout:
+                break
+            if time.monotonic() > ready:
+                raise TDError(
+                    "timeout",
+                    f"the scratch replay pane never reached cat "
+                    f"(it reports {cur.stdout.strip()!r})",
+                    hint="the tmux server may be short on resources; retry, or "
+                         "read the bytes with: term-use out -n " + session)
+            time.sleep(0.02)
+        tty = tmuxio.tmux("display-message", "-p", "-t", "rp",
+                          "-F", "#{pane_tty}", socket=sock)
+        tmuxio.require(tty, "session-missing")
+        tty_path = tty.stdout.strip()
+        if not tty_path:
+            raise TDError("tmux-failed",
+                          "tmux reported no pane_tty for the scratch pane")
+        with open(tty_path, "wb", buffering=0) as fh:
+            for text, geom in segs:
+                if geom and geom[0] and geom[1]:
+                    tmuxio.tmux("resize-window", "-t", "rp", "-x", str(geom[0]),
+                                "-y", str(geom[1]), socket=sock)
+                fh.write(text.encode("utf-8", "replace"))
+            # Settle by watching the screen stop changing. The obvious trick —
+            # append a sentinel and wait to see it — perturbs the very frame we
+            # are trying to reconstruct (it scrolls a line in and shifts the
+            # trailing blanks), so the answer has to come from observation.
+            prev = None
+            stable = 0
+            deadline = time.monotonic() + settle_s
+            while time.monotonic() < deadline:
+                time.sleep(0.1)
+                cap = tmuxio.tmux("capture-pane", "-p", "-t", "rp", socket=sock)
+                if cap.stdout == prev:
+                    stable += 1
+                    if stable >= 2:
+                        break
+                else:
+                    stable = 0
+                prev = cap.stdout
+            else:
+                raise TDError(
+                    "timeout",
+                    f"the scratch pane had not finished replaying {total} bytes "
+                    f"within {settle_s}s",
+                    hint="raise --timeout, or read the recorded bytes directly "
+                         f"with: term-use out -n {session}")
+        cap = tmuxio.tmux("capture-pane", "-p", "-e", "-N", "-t", "rp",
+                          socket=sock)
+        text = tmuxio.require(cap, "session-missing")
+    finally:
+        tmuxio.tmux("kill-server", socket=sock)
+    return text
+

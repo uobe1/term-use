@@ -15,7 +15,7 @@ from pathlib import Path
 
 from termuse import budget as tdbudget
 from termuse import input as tdinput
-from termuse import rcfile, records, screen as tdscreen
+from termuse import rcfile, records, replay, screen as tdscreen
 from termuse import screenshot as tdscreenshot
 from termuse import tmuxio, waiting
 from termuse.errors import TDError
@@ -117,9 +117,16 @@ def cmd_start(args) -> int:
         writer.state["shell_integration"] = True
         writer.save_state()
     # remain-on-exit must be set *inside* the pane before exec: short-lived
-    # commands would otherwise die (and take the session with them) before
-    # the external set-option lands.
-    inner = f"tmux set-option -w remain-on-exit on; exec {cmd}"
+    # commands would otherwise die (and take the session with them) before the
+    # external set-option lands.
+    #
+    # The gate exists for evidence completeness: the target must not run before
+    # pipe-pane is attached. Without it a program that prints at startup loses
+    # its opening bytes (measured: the first line of a reproduction was missing
+    # from raw.log), so the recording silently lies about what the pane showed.
+    # `stty -echo` keeps the release keystroke from painting a blank line first.
+    gate = "stty -echo 2>/dev/null; read __tu_gate; stty echo 2>/dev/null; "
+    inner = f"tmux set-option -w remain-on-exit on; {gate}exec {cmd}"
     res = tmuxio.tmux("new-session", "-d", "-s", args.name,
                       "-x", str(args.width), "-y", str(args.height),
                       inner, socket=args.socket)
@@ -133,9 +140,33 @@ def cmd_start(args) -> int:
     raw = shlex.quote(str(writer.dir / "raw.log"))
     tmuxio.tmux("pipe-pane", "-o", "-t", pane_id,
                 f"{sys.executable} {PIPE_SCRIPT} {raw}", socket=args.socket)
-    print(json.dumps({"ok": True, "session": args.name, "socket": args.socket,
-                      "pane_id": pane_id, "width": args.width,
-                      "height": args.height}, ensure_ascii=False))
+    attached = False
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        p = tmuxio.tmux("display-message", "-p", "-t", pane_id, "-F",
+                        "#{pane_pipe}", socket=args.socket)
+        if p.stdout.strip() == "1":
+            attached = True
+            break
+        time.sleep(0.02)
+    # Release the gate. C-d, not Enter: if the byte reaches the tty before
+    # `stty -echo` has run, an Enter would echo a blank line into the top of the
+    # pane (and into the recording), while EOF at an empty line is never
+    # echoed and `read` returns on it either way.
+    time.sleep(0.05)
+    tdinput.send(tmuxio.Target(args.socket, args.name, None, None), [],
+                 ["C-d"], [])
+    writer.append("m", {"event": "start", "recorder": attached})
+    result = {"ok": True, "session": args.name, "socket": args.socket,
+              "pane_id": pane_id, "width": args.width,
+              "height": args.height, "recorder": attached}
+    if not attached:
+        result["warning"] = "recorder-not-attached"
+        print("warning: pipe-pane did not come up, so raw.log will not record "
+              "this session's bytes; the screen channels still work. Check that "
+              f"{sys.executable} is runnable by the tmux server.",
+              file=sys.stderr)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -522,8 +553,104 @@ def cmd_resize(args) -> int:
                       "-x", str(args.width), "-y", str(args.height),
                       socket=target.socket)
     tmuxio.require(res, "session-missing")
+    state = load_state_or_none(target.session)
+    if state is not None:
+        # Recorded, because a resize reflows the screen: `replay` has to
+        # reproduce it in order to rebuild any frame after it faithfully.
+        records.V2Writer(target.session).append(
+            "r", {"cols": args.width, "rows": args.height})
     print(json.dumps({"ok": True, "width": args.width, "height": args.height},
                      ensure_ascii=False))
+    return 0
+
+
+def cmd_out(args) -> int:
+    """What the pane printed since the last thing you sent, as text.
+
+    The highest-frequency thing an agent does is "my command finished, now
+    read it" — and `screen` answers with the whole visible screen plus a
+    scrollback it has to grep by hand. This is the scoped, budgeted version.
+    """
+    target = resolve_target(args.name, getattr(args, "socket", None))
+    state = load_state_or_none(target.session)
+    if state is None:
+        raise TDError(
+            "unmanaged-pane",
+            f"out reads term-use's own recording of the pane's output; "
+            f"{args.name!r} has no state.json",
+            hint="use `screen -n NAME` for the visible text of an unmanaged "
+                 "pane, or start the target with term-use start to get the "
+                 "recorded stream")
+    offset = 0 if args.all else int(state.get("last_send_offset", 0))
+    raw = records.stream_since(target.session, offset)
+    text = replay.linear(raw)
+    shown, omitted = replay.trim(text, args.max_bytes)
+    ctx = tdbudget.text_context(shown,
+                                extra={"full_bytes": len(text.encode("utf-8"))})
+    redrawn = replay.looks_redrawn(raw)
+    if args.json:
+        print(json.dumps({"ok": True, "mode": "linear", "scope": "all" if args.all
+                                                    else "since-send",
+                          "bytes": ctx["bytes"], "truncated": omitted > 0,
+                          "omitted_bytes": omitted, "redrawn": redrawn,
+                          "text": shown, "context": ctx}, ensure_ascii=False))
+    else:
+        sys.stdout.write(shown if shown.endswith("\n") else shown + "\n")
+        if omitted:
+            print(f"note: {omitted} interior bytes omitted from the middle "
+                  f"(head and tail kept); rerun with --max-bytes 0 for all of it",
+                  file=sys.stderr)
+        if redrawn:
+            print("note: this program repositions text with cursor escapes "
+                  "(alt-screen/TUI style), so this linear text is not the frame "
+                  "it showed — get the real frame with: term-use replay -n "
+                  f"{target.session} --at last-send", file=sys.stderr)
+    tdbudget.warn(ctx, target.session)
+    return 0
+
+
+def cmd_replay(args) -> int:
+    """The screen at an earlier moment, rebuilt through tmux itself."""
+    target = resolve_target(args.name, getattr(args, "socket", None))
+    head = records.header(target.session)
+    if head is None:
+        raise TDError(
+            "session-missing",
+            f"no raw.log recording to replay for {args.name!r}",
+            hint="replay works on sessions started by term-use start; the "
+                 "current screen of any pane is `screen -n NAME`")
+    _h, elapsed, offset = replay.resolve_at(target.session, args.at)
+    cols = int(head.get("width") or 80)
+    rows = int(head.get("height") or 24)
+    text = replay.frame(target.session, elapsed=elapsed, offset=offset,
+                        cols=cols, rows=rows, settle_s=args.timeout)
+    grid = tdscreen.parse_grid(text)
+    stats = tdscreen.grid_stats(grid)
+    plain = tdscreen.visible_text(text)
+    if args.format == "png":
+        out_path = args.o or default_shot_path(target.session, "png",
+                                               load_state_or_none(target.session) is not None)
+        try:
+            info = tdscreenshot.render(grid, out_path, "png", cols=cols, rows=rows)
+        except ImportError:
+            raise TDError("pillow-missing",
+                          "Pillow is required for the image channel",
+                          hint="pkg install python-pillow (or: pip install Pillow)")
+        ctx = tdbudget.image_context(info["path"], info["size"])
+        print(json.dumps({"ok": True, "at": args.at, "format": "png", **info,
+                          "replayed": True, "context": ctx}, ensure_ascii=False))
+        tdbudget.warn(ctx, target.session)
+        return 0
+    if args.format == "json":
+        ctx = tdbudget.text_context(plain)
+        print(json.dumps({"ok": True, "at": args.at, "grid": [cols, rows],
+                          "engine": "pane-replay", "blank": stats["blank"],
+                          "cells": stats["painted_cells"], "text": plain,
+                          "context": ctx}, ensure_ascii=False))
+        tdbudget.warn(ctx, target.session)
+        return 0
+    sys.stdout.write(plain if plain.endswith("\n") else plain + "\n")
+    tdbudget.warn(tdbudget.text_context(plain), target.session)
     return 0
 
 
@@ -836,6 +963,36 @@ def build_parser() -> argparse.ArgumentParser:
                    help="accepted for target uniformity; trace reads local records")
     p.add_argument("--format", choices=["text", "json"], default="text")
     p.set_defaults(func=cmd_trace)
+
+    p = sub.add_parser("out", help="what the pane printed since your last send "
+                                   "(text, inside a context budget)")
+    p.add_argument("-n", "--name", required=True, help="session name")
+    p.add_argument("--socket", default=None,
+                   help="accepted for target uniformity; out reads local records")
+    p.add_argument("--all", action="store_true",
+                   help="the whole session instead of since the last send")
+    p.add_argument("--max-bytes", type=int, default=10000, metavar="N",
+                   help="byte budget: keep head + tail, mark what was omitted "
+                        "(0 = everything, default 10000)")
+    p.add_argument("--json", action="store_true",
+                   help="structured result (text, truncated, omitted_bytes, context)")
+    p.set_defaults(func=cmd_out)
+
+    p = sub.add_parser("replay", help="the screen at an earlier moment, rebuilt "
+                                      "by feeding raw.log back through tmux")
+    p.add_argument("-n", "--name", required=True, help="session name")
+    p.add_argument("--socket", default=None,
+                   help="accepted for target uniformity; replay reads local records")
+    p.add_argument("--at", required=True, metavar="WHEN",
+                   help="elapsed seconds from session start, offset:N, start, "
+                        "or last-send")
+    p.add_argument("--format", choices=["text", "json", "png"], default="text")
+    p.add_argument("-o", "--out", dest="o", default=None, metavar="PATH",
+                   help="output file for --format png")
+    p.add_argument("--timeout", type=float, default=10.0,
+                   help="how long to wait for the scratch pane to consume the "
+                        "recording (default 10)")
+    p.set_defaults(func=cmd_replay)
     return parser
 
 
