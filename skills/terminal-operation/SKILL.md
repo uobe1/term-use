@@ -1,247 +1,256 @@
 ---
-name: debugging-interactive-terminals
-description: Use when debugging, driving, or reproducing issues in interactive terminal programs — tmux panes, full-screen TUIs (nano, vim, htop, less), interactive REPLs (bash, python, node), animated TUI apps (ink, bubbletea), nested tmux, interactive menus and wizards, or when you must confirm a command finished, get an exit code, select a menu item, or capture what an on-screen program really shows
+name: terminal-operation
+description: 终端操作 — drive, observe and verify real terminal programs. Use for any hands-on terminal work: running or reproducing commands, debugging interactive programs (tmux panes, full-screen TUIs like vim/htop/less, REPLs, ink/bubbletea apps, nested tmux), confirming a command finished and getting its exit code, selecting a menu item, reading what a screen shows, screenshotting a layout, and waits that must not be guessed
 ---
 
-# Debugging Interactive Terminals
+# Terminal operation (终端操作)
 
 ## Overview
 
 Interactive programs own a screen and react to keystrokes; stdout capture and blind `sleep`
-both fail. term-use v2 drives them through tmux and replaces guessing with **evidence**:
-every wait returns a verdict with a confidence level, every failure returns structured JSON
-with a screen snapshot attached. The skill teaches a **method for unfamiliar programs** —
-observe, derive anchors from what the program actually paints, confirm with probes — not a
-table of pre-known screens.
+both fail. `term-use` drives them through tmux and replaces guessing with **evidence**: every
+wait returns a verdict with a confidence level, every failure returns structured JSON with a
+screen snapshot attached, and every observation states what it costs your context.
 
-**Core principles**
+This skill teaches a **method for unfamiliar programs** — observe, derive anchors from what the
+program actually paints, confirm with probes — not a table of pre-known screens.
 
-1. **Wait for state, then act.** Never sleep, never guess a delay. After every action, `wait`
-   for the condition you expect before the next one.
-2. **Know what your evidence is worth.** `fact` (shell protocol / pane death) beats
-   `inference` (screen regex — echo can fake it) beats `heuristic` (sampling-based quiet
-   detection). Prefer fact; treat heuristic as "probably safe".
-3. **Pick the right observation channel.** Attribute/semantic questions ("which item is
-   selected", "what color is it", "find the row with X") → `screen` text channels. Spatial
-   layout questions ("what does the frame look like", "where is the dialog box drawn") →
-   `screenshot`. You may alternate freely.
+**Three principles**
 
-CLI: `term-use` (after install) or `PYTHONPATH=<repo>/src python3 -m termuse` (only external dependency: tmux).
+1. **Wait for state, then act.** Never sleep instead of waiting. After every action, `wait` for
+   the condition you expect before the next one.
+2. **Know what your evidence is worth.** `fact` (shell protocol / pane death) beats `inference`
+   (screen regex — your own echo can fake it) beats `heuristic` (sampling). Take the strongest
+   one the target supports; `wait --done` does that selection for you and says which it used.
+3. **Take the cheapest observation that settles the question.** Text channels are exact and
+   cheap; an image is for the one question text cannot answer — layout — and costs more every
+   time you look at it.
 
-## Quick Reference
+CLI: `term-use` (installed) or `PYTHONPATH=<repo>/src python3 -m termuse` (only external
+dependency: tmux; Pillow is needed by `screenshot` alone).
+
+## Choosing what to look at
+
+| Question | Use | Why |
+|---|---|---|
+| Did my command finish? exit code? | `wait --done` | fact level where the shell can prove it |
+| Which item is highlighted? what color? is string X on screen? where do I click? | `screen --grep` / `--find` / `--element-at` | exact attributes, cheap |
+| What did that command print? | `out` | scoped to your last send, inside a byte budget |
+| What did the screen look like a moment ago? | `replay --at` | rebuilt through tmux itself from the recording |
+| How is this frame laid out — where is the dialog, is the box aligned? | `screenshot` (once) | the one question pixels answer better |
+| Is anything on screen at all? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` | separates "empty" from "my input never landed" |
+
+Measured, against the intuition that a multimodal model should prefer pictures: in OSWorld,
+agents given **text/a11y observations scored 12.24% vs 5.26% for screenshots**, and stacking
+image history in the context is what failed. So: text by default, one screenshot per layout
+question, and never a running series of them.
+
+## Quick reference
 
 | Command | Purpose |
 |---------|---------|
-| `start -n N --cmd bash --width W --height H` | create session (+ v2 recording; bash gets OSC 133 integration) |
-| `send -n N --type "text" --key Enter [--repeat N --delay S]` | inject input; ONE CLI call may carry both — term-use internally issues separate tmux send-keys calls (text and key names mixed in one tmux call silently drop keys); keys use tmux names (`Enter Escape C-c C-o`). `--repeat N` repeats the whole injection as N independent sends, `--delay S` between them (default 0.35) — debounced menus, double-key rhythms |
-| `screen -n N [--meta] [-N] [-J] [--grid] [--runs] [--grep --attr A] [--find TEXT] [--element-at X Y]` | text channel: status, trailing spaces, join, SGR cell grid, runs, **attribute row filter** (`--grep` takes NO text pattern — rows matching `--fg`/`--bg`/`--attr`; pipe plain `screen` output to grep for text), **literal text finder** (`--find` → 1-based click-ready coords, feed into `click`), cell lookup |
-| `wait -n N --cmd-done [--expect-code 0]` | **command finished + exit code (fact)** — a bare call right after `start` always times out (bash's first marker reads as aborted): probe with `--shell-ready` first, see the standard loop below |
-| `wait -n N --shell-ready [--timeout S]` | CLI sends the `true` probe itself and waits for the shell's OSC 133 answer (fact); use right after `start` and after leaving a nested program; timeout → `shell-not-ready` error |
-| `wait -n N --exit [--expect-code N]` | pane exit / death, signal name in evidence (fact) |
-| `wait -n N --until 'regex' [--scrollback N]` | screen regex (inference; rstrip self-heal for trailing spaces) |
-| `wait -n N --quiet-ms 800` | screen stable for N ms (heuristic; animation-immune) |
-| `screenshot -n N --format png -o p.png` | image channel via Pillow + a monospace font (probes Android/Termux then `/usr/share/fonts` etc.; force one with `TERM_USE_FONT=/path/Mono.ttf`; no Pillow → `pillow-missing`, no font → `font-missing` — both structured, and no other channel needs either) |
+| `start -n N --cmd bash --width W --height H` | create a session (+ recording; bash/zsh get OSC 133 injected, fish ≥4 emits it itself) |
+| `send -n N --type "text" --key Enter [--repeat K --delay S]` | inject input; text and key names are always separate tmux calls (mixing them in one call silently drops keys); `--repeat/--delay` for debounced menus and double-key rhythms |
+| `wait -n N --done [--expect-code C]` | **the last thing you sent has finished** — strongest oracle available, verdict carries `via` + `exit_code` |
+| `wait -n N --cmd-done / --shell-ready / --exit / --until 're' / --quiet-ms 800` | the individual oracles: OSC 133 done (fact), `true` probe (fact), pane death (fact), screen regex (inference), stability sampling (heuristic) |
+| `wait … --until 're' --since-send` | match only output produced after the last send — no stale anchor can satisfy it |
+| `screen -n N [--meta] [-N] [-J] [--grid] [--runs] [--grep --attr A] [--find TEXT] [--element-at X Y]` | text channel; `--find` → 1-based click-ready coords (screen columns, wide glyphs counted correctly) |
+| `out -n N [--all] [--max-bytes K] [--json]` | what the pane printed since your last send, as text, head+tail with the elision marked |
+| `replay -n N --at 3.5\|offset:N\|last-send [--format text\|json\|png]` | the screen at an earlier moment, rebuilt by feeding raw.log back through tmux |
+| `screenshot -n N [-o p.png] [--format png\|jpg] [--font-size 16] [--no-cursor]` | image channel; `-o` optional (numbered file beside the session's evidence); reports `glyphs.missing` honestly |
+| `clear -n N [--history-only]` | reclaim the screen and scrollback before the next capture costs you again |
 | `mouse-detect -n N` / `click -n N X Y` | mouse mode (SGR) / click at 1-based coords |
 | `fix-tty -n N` | restore sane terminal (stty sane) after ECHO damage |
-| `trace -n N [--format json]` | project raw.log: input/output/sync events |
+| `trace -n N [--format json]` | project raw.log: input/output/sync events with timestamps |
 | `sessions [--socket NAME]` / `stop -n N` | list sessions / kill session |
 
-Targets are `(socket, session, window, pane)` four-tuples: `-n "sess"`, `"sess:win"`,
-`"sock:sess:win.pane"`. Nested tmux panes are directly addressable via their socket name
-(see Nested tmux below). `wait` defaults: `--timeout 10` (seconds), `--interval 0.1`.
-`--until` patterns are Python `re` with DOTALL|MULTILINE — alternation (`a|b`) works.
+Targets are `(socket, session, window, pane)`: `-n "sess"`, `"sess:win"`,
+`"sock:sess:win.pane"`. A session living on a named socket must be spelled that way or
+given `--socket`; `sessions --socket NAME` lists what exists. `wait` defaults:
+`--timeout 10 --interval 0.1`. `--until` is Python `re` with DOTALL|MULTILINE.
 `--grep` attr names: bold, dim, italic, underline, blink, reverse, strikethrough; fg/bg take
-color names (black..white, bright-*) or 256-palette indexes or `#rrggbb`.
-Single-letter program commands (pager `q`, top's `P`) are TEXT — `send --type q`; `--key`
-accepts tmux key names only and errors with a table of them if you try a letter.
+color names, 256-palette indexes or `#rrggbb`. Single-letter program keys are text
+(`send --type q`); `--key` takes tmux key names only and errors with a table if you try one.
 
-## Confirming a command finished (the standard loop)
+## The standard loop
 
 ```bash
-TD="term-use"   # or: PYTHONPATH=$REPO/src python3 -m termuse
+TD=term-use   # or: PYTHONPATH=$REPO/src python3 -m termuse
 $TD start -n demo --cmd bash --width 100 --height 30
-$TD wait  -n demo --shell-ready --timeout 10    # probe: shell is ready (fact)
 $TD send  -n demo --type "make build" --key Enter
-$TD wait  -n demo --cmd-done --expect-code 0 --timeout 120   # fact: exit code 0
+$TD wait  -n demo --done --expect-code 0 --timeout 120   # fact, or the best the target allows
+$TD out   -n demo                       # what it printed, budgeted
 ```
 
-- **Why the probe** (`--shell-ready` sends `true` + Enter itself, waits for the shell's
-  OSC 133 answer): bash's first startup emits a `D` marker with no preceding `C`, which
-  the scanner classifies as aborted — a bare `--cmd-done` right after `start` always
-  times out. The probe's answer is the first real `done` and proves the shell is reading
-  input. It doubles as the "is the shell back?" check after leaving a nested program: a
-  live REPL swallows it → `shell-not-ready` (evidence.screen shows the probe sitting on
-  the program's prompt line — send the program's quit key, then re-probe).
-- `--cmd-done` reads OSC 133 markers injected into bash (exit code from shell protocol → `fact`).
-- Wrong `--expect-code` fails **immediately** with `expect-code-mismatch` (no timeout burn);
-  pane death mid-wait fails immediately with `pane-dead` / `pane-dead-by-signal` + respawn hint.
-- No shell integration (`start --cmd sh` and other non-bash; `--shell-ready` refuses the
-  same way) → immediate structured `no-shell-integration` error. `--exit` still works
-  there (pane death is tmux-level, fact); for in-shell completion fall back to `--until`
-  on the program's own output marker.
+`--done` picks: OSC 133 done-marker (fact, with exit code) → the `true` probe when nothing has
+been sent yet → pane death when the program *is* the pane → quiet sampling (heuristic, and it
+will say so). The verdict's `via` names the channel and `advice` points at a stronger one when
+the target could support it — read `advice` before you trust a weak confidence.
+
+A bare `--cmd-done` right after `start` always times out: bash's startup emits a `D` with no
+preceding `C`, which reads as aborted. `--done` handles that case by probing; if you use
+`--cmd-done` directly, probe with `--shell-ready` first. The probe doubles as "is the shell
+back?" after leaving a nested program — a live REPL swallows it, so it fails with
+`shell-not-ready` and the evidence shows the probe sitting on that program's prompt.
+
+Wrong `--expect-code` fails immediately (`expect-code-mismatch`), never after burning the
+timeout; pane death mid-wait fails immediately with `pane-dead` / `pane-dead-by-signal`
+(signal names are normalized — tmux answers "9" on some builds, "KILL" on others).
+
+## Keeping the context bill down
+
+Every observation returns a `context` block: `bytes` (exact), `est_tokens` + `method`
+(estimate — `bytes/4` for text, pixels/750 for an image), `budget`, `over_budget`. When a
+capture is over budget the tool says so on stderr and names the fix.
+
+- A fat pane is not free: `capture-pane` shows what is on screen *plus* what scrolled, so every
+  later read re-carries the same bytes. When warned, run `clear -n N` (or start a fresh session)
+  before the next capture.
+- Prefer the narrowest channel that answers: `--grep`/`--find` over a full `--grid`; `out` over
+  `screen --scrollback 500`; `--json`/`--text` output over piping a whole screen into your eye.
+- One screenshot per layout question. Images are the most expensive thing you can put in
+  context and the least useful to accumulate.
+- `TERM_USE_CONTEXT_BUDGET` retunes the threshold to your host.
 
 ## Common Mistakes
 
-- **`--type "cmd" --enter`**: v2 has no `--enter`. Always `--type "cmd" --key Enter` — text
-  and keys are separate calls, and Enter is a key.
-- **"Never sleep" means "never sleep instead of waiting"**: sleep is banned as a
-  completion oracle, but allowed as the pace of a polling loop — `sleep 0.5-1` + `screen`
-  when nothing is waitable (timer-driven screens, menus, unmanaged panes). Pick the
-  shortest pause that outlasts one observed repaint period.
-- **Trailing spaces**: the terminal rstrips lines, so `'your name: '` won't match raw text.
-  `--until` self-heals (matches rstripped text + a sentinel space) — trust it, and never
-  invent regexes that require trailing spaces to survive.
-- **Echo-anchored waits are untrustworthy**: you see your own typed text on screen.
-  `wait --until` detects this — if the matched text is a substring of what you last sent,
-  the verdict is flagged `echo_suspect: true` and confidence drops to `heuristic`.
-  **Never put the marker you wait for inside your sent text**; split it at runtime
-  (`print('OUT_' + '42')`) or anchor on *program output* / `--cmd-done` (fact). When the
-  word is unavoidably both input and output (pager search terms, commands echoing
-  filenames), don't wait on it — act, then **verify by reading the screen**
-  (`screen | grep`).
-  Leftover echoes from earlier experiments can also pollute later waits — and note
-  `--until` matches the CURRENT screen, not "newly appeared" text: a stale anchor still
-  on screen (an old `^>>>` prompt, earlier output) makes the new wait return met
-  instantly. Beware also: YOUR shell expands `$((...))`/`$VAR` in double quotes before
-  the text is injected, silently merging input and marker.
-- **Never send a confirm key on a fixed sleep**: before EVERY TUI confirmation key
-  (Enter on a save prompt or menu choice), wait for the prompt text itself (`--until`,
-  or quiet + screen check) — a key sent before the prompt appears lands in the edit
-  buffer and corrupts state (measured: nano `C-o` → immediate Enter forced an extra
+- **`--type "cmd" --enter`**: there is no `--enter`. Text and keys are separate calls and Enter
+  is a key: `--type "cmd" --key Enter`.
+- **"Never sleep" means never sleep *instead of waiting*.** Sleep is legitimate as the pace of a
+  polling loop when nothing is waitable (timer-driven screens, menus, unmanaged panes):
+  `sleep 0.5-1` + `screen`. Pick the shortest pause that outlasts one observed repaint period.
+- **Echo-anchored waits are untrustworthy.** You see your own typed text on screen, so
+  `wait --until` on a substring of what you sent is your echo, and the verdict says so
+  (`echo_suspect: true`, confidence downgraded to `heuristic`). Never put the marker you wait for
+  inside your sent text — split it at runtime (`print('OUT_' + '42')`) or anchor on program
+  output / `--done`. When a word is unavoidably both input and output (pager searches, commands
+  echoing filenames), don't wait on it: act, then verify by reading the screen.
+- **Stale anchors.** `--until` matches the *current* screen, so an anchor left by an earlier
+  command satisfies a new wait instantly. Use `--since-send` to match only new output, or
+  `--done`. Beware also: your own shell expands `$VAR`/`$(...)` inside double quotes before the
+  text is injected, merging input and marker.
+- **Trailing spaces.** The terminal rstrips lines, so `'your name: '` won't match raw text.
+  `--until` self-heals (matches rstripped text plus a sentinel space) — trust it instead of
+  writing a regex that requires trailing spaces to survive.
+- **Confirm keys on a fixed sleep.** Before EVERY TUI confirmation key (Enter on a save prompt or
+  menu choice), wait for the prompt text itself — a key sent before the prompt appears lands in
+  the edit buffer and corrupts state (measured: nano `C-o` then immediate Enter cost an extra
   round-trip).
-- **Spinners defeat quiet**: an animated line changes every 150 ms but a slow device can
-  sample identical frames ~600 ms apart (frame-cycle resonance). `--quiet-ms` also gates
-  on the raw stream's last-write time (25% margin), so it won't settle while a spinner
-  runs — pick 2-3x the observed frame period, anchor with `--until` when a "done" marker
-  exists, and don't trust a large quiet value across a phase where the program may only
-  *start* thinking after your input (wait for the stream to start first). **Menu screens
-  are quiet-hostile too** (modal pickers repaint on a timer): use `sleep 0.5-1` + `screen`
-  inside menus. Menu arrows also debounce: `send --key Up --key Up` in one call moves the
-  selection **once** — one arrow per call, ~0.35s apart.
-- **Selecting item N in a menu** (recipe): read the highlight with `screen --grep --attr
-  reverse` (prints the highlighted row; most curses apps draw it reversed) → send the
-  arrows in one call, `send --key Down --repeat 3` (N independent sends, 0.35s apart by
-  default) → **re-run the grep to verify the highlight landed where you intended** before
-  Enter. Attribute channels don't cover every program: less's search highlight does not
-  present as `reverse` — for pager-style highlights verify by plain text match instead.
-- **Live-monitor TUIs (top/htop-style) repaint on a timer**: one captured frame can be
-  mid-repaint or stale, and short-lived processes vanish between refreshes — read two
-  frames ~2s apart and answer only if they agree. Answer from the program's own sorted
-  rows, not aggregate header lines, which can be wrong on exotic platforms (measured on
-  Android: `800%cpu 800%idle` while per-process rows were still usable).
-- **REPL block input**: ANY colon-opening statement enters the continuation prompt
-  (`...`) — even a physically single-line `def f(): return 1`, and the block needs ONE
-  extra empty Enter to close; otherwise your next line is swallowed into the block
-  (measured: needed `C-c` rescue). Prefer colon-free one-liners (lambda, `;`-joined);
-  for real blocks send each line separately and anchor on the block's *result*, not
-  the prompts.
-- **Non-writable /tmp on sandboxed platforms** (measured on Termux/Android): scripts and
-  fixtures aimed at `/tmp` die with Permission denied — use `$TMPDIR` (or the session's
-  working directory) for throwaway files.
-- **C-\\**: no key name exists; send raw bytes: `send --hex 1c`. Same for any byte without
-  a tmux key name. Multi-byte sequences work too (`--hex 1b5b31333b3275` = kitty
-  Shift+Enter) — tmux's `-H` takes one byte per argument, so the CLI splits the string
-  for you within a single send-keys call (escape sequences arrive contiguously).
-- **Stuck/echo-less screen**: a program may have mangled the tty (`stty -echo`). `send`
-  warns `tty-echo-broken` when your text produces no echo bytes; run `fix-tty`.
-- **Mouse apps**: `mouse-detect` first; `click X Y` is 1-based while curses programs print
-  0-based coords.
-- **Long typed text wraps**: a ~90-char `--type` wraps on a 100-col pane (the on-screen
-  echo breaks mid-word); a `--until` pattern spanning that text must match the *wrapped*
-  screen — or keep sent commands short and let the program print the marker. Note
-  `evidence.screen` shows the prompt verbatim: `~/.../` is the shell's PS1, not term-use;
-  use `screen --meta`'s `pane_current_path` for the real cwd.
-- **Leaking sessions**: always `stop` (or `tmux kill-server` in test cleanup). Stopping the
-  last session kills the whole tmux server, taking nested sessions with it.
+- **Spinners defeat quiet.** An animated line changes every ~150ms but a slow device can sample
+  identical frames at exactly that period (frame-cycle resonance). `--quiet-ms` also gates on the
+  raw stream's last-write time (25% margin), so choose 2-3x the observed frame period, anchor on
+  a "done" marker where one exists, and don't trust a large quiet value across a phase where the
+  program may only *start* thinking after your input. Menu screens are quiet-hostile too (modal
+  pickers repaint on a timer): `sleep 0.5-1` + `screen` inside menus.
+- **Menu arrows debounce.** `send --key Up --key Up` in one call moves the selection **once** —
+  one arrow per call, ~0.35s apart, or `send --key Down --repeat 3 --delay 0.35`.
+- **Selecting item N in a menu** (recipe): read the highlight with `screen --grep --attr reverse`
+  → send the arrows with `--repeat` → **re-run the grep to verify the highlight landed where you
+  intended** before Enter. Attribute channels don't cover every program: less's search highlight
+  does not present as `reverse` — for pager-style highlights verify by plain text match.
+- **Live-monitor TUIs (top/htop-style) repaint on a timer.** One captured frame can be
+  mid-repaint, and short-lived processes vanish between refreshes — read two frames ~2s apart and
+  answer only if they agree. Answer from the program's own sorted rows, not aggregate header lines
+  (measured: `800%cpu 800%idle` while per-process rows were still usable).
+- **REPL block input.** ANY colon-opening statement enters the continuation prompt (`...`), and
+  the block needs ONE extra empty Enter to close, otherwise your next line is swallowed. Prefer
+  colon-free one-liners; for real blocks send each line separately and anchor on the block's
+  *result*, not the prompts.
+- **Stuck / echo-less screen.** A program may have mangled the tty (`stty -echo`); `send` warns
+  `tty-echo-broken` when your text produces no echo bytes. Run `fix-tty`. When a session looks
+  hung, check `screen --meta`: `unexecuted_input` non-empty with a growing `last_output_age_s`
+  means your keystrokes are landing on a line nothing is reading — that is a different diagnosis
+  from a program that is merely quiet.
+- **Keys without names.** `C-\` has no tmux key name: send raw bytes `send --hex 1c`. Multi-byte
+  sequences work (`--hex 1b5b31333b3275` = kitty Shift+Enter); the CLI splits one byte per `-H`
+  because tmux 3.x drops multi-byte `-H`.
+- **Mouse apps**: `mouse-detect` first; `click X Y` is 1-based while curses programs print 0-based
+  coords.
+- **Long typed text wraps.** A ~90-char `--type` wraps on a 100-col pane, so a `--until` pattern
+  spanning it must match the *wrapped* screen — or keep commands short and let the program print
+  the marker. `evidence.screen` shows the prompt verbatim: `~/.../` is the shell's PS1, not
+  term-use; use `screen --meta`'s `pane_current_path` for the real cwd.
+- **Blank screens are a state.** After `clear`, or when a full-screen program has exited, or when
+  a daemon prints nothing, the pane legitimately shows nothing: `screenshot` still writes a
+  pane-shaped image and reports `blank: true`, and `screen` says "no text" rather than failing.
+- **Throwaway files.** On sandboxed platforms `/tmp` may be unwritable (measured on Android):
+  use `$TMPDIR` or the session's working directory.
+- **Leaking sessions.** Always `stop`. Stopping the last session kills the whole tmux server,
+  taking nested sessions with it.
+- **Inherited terminal environment.** tmux can print an error and still exit 0 (a default socket
+  owned by another user, a `TMUX_TMPDIR` pointing somewhere that does not exist here). term-use
+  reports those as `socket-unreachable` with the fix; on a shared machine, work on your own
+  `--socket NAME`.
 
 ## Nested tmux
 
-A tmux client running *inside* a term-use pane is directly drivable — with three
-measured gotchas:
+A tmux client running *inside* a term-use pane is directly drivable — with three measured
+gotchas:
 
-1. **`$TMUX` blocks the nested client** — tmux refuses to start ("sessions should be nested
-   with care, unset $TMUX to force"). Run `unset TMUX; tmux new-session -s inner ...`.
-2. **Address inner panes by socket name**: the default socket's name is literally
-   `default` — `screen -n default:inner:0.0` works; a bare `-n inner` does NOT (it looks
-   for a term-use-managed session and fails with `session-missing`).
-3. **wait on unmanaged panes** (term-use didn't start them): `--until`/`--quiet-ms`
-   work with degraded confidence — capped at `heuristic`, condition JSON carries
-   `"degraded": "unmanaged"`, and raw-stream echo detection is off (anchor on output
-   that isn't a substring of your input). `--cmd-done`/`--shell-ready` refuse with
-   structured `unmanaged-pane` (shell-protocol facts need a managed session). `--exit`
-   works even when the pane's death takes its session with it (no remain-on-exit): the
-   verdict is still met/fact but carries `"degraded": "status-unavailable"` and
-   `exit_code: null` — don't pass `--expect-code` on unmanaged panes (a vanished pane
-   can't prove its exit code → `expect-code-mismatch`). `send` and `screen` work
-   unchanged.
-
-## Anti-Cheating Red Lines
-
-- **Never** bypass the CLI by editing files the program owns, or by `Write`-ing the expected
-  output into place. The whole point is observing the program's real behavior.
-- **Never** claim a run happened without evidence: attach `trace` output (or the session's
-  `raw.log` events) and, for layout claims, the `screenshot` path.
-- Timeouts are data: report the `error` JSON (screen snapshot inside), don't swallow it.
+1. **`$TMUX` blocks the nested client** — tmux refuses to start ("sessions should be nested with
+   care, unset $TMUX to force"). Run `unset TMUX; tmux new-session -s inner ...`.
+2. **Address inner panes by socket name**: the default socket's name is literally `default` —
+   `screen -n default:inner:0.0` works; a bare `-n inner` does NOT (it looks for a term-use-managed
+   session and fails with `session-missing`).
+3. **wait on unmanaged panes** (term-use didn't start them): `--until`/`--quiet-ms` work with
+   degraded confidence — capped at `heuristic`, `"degraded": "unmanaged"` in the verdict, and raw
+   echo detection off (anchor on output that isn't a substring of your input).
+   `--cmd-done`/`--shell-ready`/`--since-send`/`out` refuse with `unmanaged-pane` (they need the
+   recording). `--exit` works even when the pane's death takes its session with it: met/fact with
+   `"degraded": "status-unavailable"` and `exit_code: null` — so don't pass `--expect-code` there.
+   `send`, `screen`, `clear` work unchanged.
 
 ## Driving an unfamiliar interactive program
 
 Work in this order — observe before you anchor, anchor before you drive:
 
 **1. Classify the program** — it decides how completion and exit are confirmed:
-   - *Program IS the pane* (`start --cmd <prog>`): its death is observable → confirm exit
-     with `wait --exit` (fact; works for non-bash too).
-   - *Program inside bash* (`send <prog> --key Enter` in a bash pane): the pane always
-     belongs to bash → `--exit` never fires; "did it exit?" is confirmed with
-     `wait --shell-ready` (a live interactive program swallows the probe instead of
-     letting bash execute it, so it fails with `shell-not-ready` until the program
-     quits). **Do NOT probe with `pgrep`** — term-use's own recorder is a python3
-     process, so a process count is never 0 (measured: 4 in a bare session).
+   - *Program IS the pane* (`start --cmd <prog>`, including `bash script.sh` / `sh -c '…'`): its
+     death is observable → `wait --exit` (fact; works for non-bash too).
+   - *Program inside bash* (`send <prog> --key Enter` in a bash pane): the pane always belongs to
+     bash → `--exit` never fires; "did it exit?" is answered by `wait --shell-ready` (it fails
+     with `shell-not-ready` while the program still holds the terminal — send its quit key, then
+     re-probe). **Do NOT probe with `pgrep`** — term-use's own recorder is a python3 process, so a
+     process count is never 0 (measured: 4 in a bare session).
    - *REPL* (prompt + eval): the prompt is the anchor; results are verified by reading
-     `screen -J | grep`, never by waiting on a substring of what you sent.
-   - *Full-screen TUI* (alt-screen, repaints): prompt-less; anchors come from observation
-     (step 2). After it exits, the alt-screen restores and stale frames can fake-settle
-     short quiets and re-match old `--until` anchors — re-verify the screen after any
-     program swap; anchor the new program's first paint, don't trust a quiet interval.
+     `out` / `screen -J | grep`, never by waiting on a substring of what you sent.
+   - *Full-screen TUI* (alt-screen, repaints): prompt-less; anchors come from observation (step 2).
+     After it exits, the alt-screen restores and stale frames can fake-settle short quiets and
+     re-match old anchors — re-verify the screen after any program swap; anchor the new program's
+     first paint.
 
-**2. Observe, then derive the anchor.** Launch, then catch the first paint before you have
-   any anchor: `wait --quiet-ms 700` (non-animated programs settle fast) or `sleep 1` +
-   `screen` for timer-driven ones — read what the program ACTUALLY paints, then wait on
-   it. Good anchors, in rough strength order: dialog text the program itself prints,
-   status-line vocabulary shown only in a specific phase, prompt shapes (`^>>>`, `^>$`).
-   Bad anchors: substrings of your own input (echo_suspect), text you know from a
-   *different* program's manual — every anchor string belongs to the program it was
-   measured on (measured drift: nano 9.2's save prompt is `Write to File:`, older nano
-   said `File Name to Write`). Derive yours from your program's screen; when an anchor
-   times out, read `evidence.screen` and re-anchor. Set `--timeout` from a first measured
-   run (×3-5 headroom; raise it for slow cold starts, e.g. a Node CLI measured ~20s to
-   first paint on Android).
+**2. Observe, then derive the anchor.** Launch, then catch the first paint before you have any
+   anchor: `wait --quiet-ms 700` (non-animated programs settle fast) or `sleep 1` + `screen` for
+   timer-driven ones — read what the program ACTUALLY paints, then wait on it. Good anchors, in
+   rough strength order: dialog text the program prints itself, status-line vocabulary shown only
+   in one phase, prompt shapes (`^>>>`, `^>$`). Bad anchors: substrings of your own input, and
+   text you know from a *different* program's manual — every anchor belongs to the program it was
+   measured on (measured drift: nano 9.2's save prompt is `Write to File:`, older nano said
+   `File Name to Write`). Derive yours from your program's screen; when an anchor times out, read
+   `evidence.screen` and re-anchor. Set `--timeout` from a first measured run (×3-5 headroom;
+   raise it for slow cold starts — measured: a Node CLI took ~20s to first paint on a phone).
 
 **3. Find the exit path before you need it.** Check `--help`/man for the quit key; common
-   conventions: `q` (pagers), `C-d` (REPLs / EOF), `C-c` (interrupt), `Escape` ×N (menus) —
-   but verify on screen instead of assuming. After the quit keystroke, confirm the shell
-   took input back with `wait --shell-ready`, not by trusting the screen. Double-tap
-   rhythms are program-specific and fragile: `--repeat 2 --delay 0.3` sends the pair as
-   two independent calls in one CLI invocation — measure which rhythm works before
-   relying on it, and err on the short side with delays (each CLI invocation's startup
-   inflates the gap).
+   conventions are `q` (pagers), `C-d` (REPLs), `C-c` (interrupt), `Escape` ×N (menus) — verify on
+   screen rather than assuming. After the quit keystroke, confirm the shell took input back with
+   `wait --shell-ready`. Double-tap rhythms are program-specific: `--repeat 2 --delay 0.3` sends
+   the pair as two independent calls in one invocation; measure which rhythm works, and err short,
+   since each CLI invocation's startup inflates the gap.
 
-**4. Drive in a wait-loop.** One action → wait for its observed effect → next action.
-   When nothing new is waitable (input produces no fresh output, answers finish before
-   the streaming phase is catchable), stop burning waits and poll `screen` for evidence
-   (~1s per poll round at 0.5s sleep + CLI overhead) instead. On unmanaged panes
-   `--exit` still reports the death, just without an exit code (see Nested tmux).
+**4. Drive in a wait-loop.** One action → wait for its observed effect → next action. When nothing
+   new is waitable (input produces no fresh output, answers finish before the streaming phase is
+   catchable), stop burning waits and poll `screen` for evidence instead.
 
-## Worked micro-example
+## Anti-cheating red lines
 
-Strings below belong to THAT program (codebuddy CLI, an ink TUI), not to the rules:
-`unset` of inherited agent env was needed before the TUI would mount (tell: zero bytes
-after the command echo); it must NOT be `exec`'d (replacing bash kills the OSC 133
-reporter, so `--cmd-done` can never fire); first launch paints a trust dialog (anchor =
-the dialog's own text); exit is a double C-c (`--repeat 2 --delay 0.3`), confirmed by
-`--cmd-done --expect-code 0`. Your program's anchors will differ — find them in step 2.
+- **Never** bypass the CLI by editing files the program owns, or by `Write`-ing the expected
+  output into place. The whole point is observing the program's real behavior.
+- **Never** claim a run happened without evidence: attach the `out`/`trace` text and, for layout
+  claims, the `screenshot` path.
+- Timeouts are data: report the `error` JSON (screen snapshot inside), don't swallow it.
 
-## Tester Feedback Protocol
+## Tester feedback protocol
 
-If you were handed this skill as a blind tester: you have the right to complain — after any
-task, append a line `FEEDBACK: <what confused you / what was missing / what you had to guess>`
-to your output. Complaints feed directly into this skill's next revision.
+If you were handed this skill as a blind tester: you have the right to complain — after any task,
+append a line `FEEDBACK: <what confused you / what was missing / what you had to guess>` to your
+output. Complaints feed directly into this skill's next revision.

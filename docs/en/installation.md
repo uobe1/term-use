@@ -6,12 +6,12 @@ nested tmux — through tmux. It replaces blind `sleep`s and screen-scraping wit
 verdicts backed by evidence.
 
 - Project / source: **https://github.com/uobe1/term-use**
-- Agent skill manual: `skills/debugging-interactive-terminals/SKILL.md`
+- Agent skill manual: `skills/terminal-operation/SKILL.md`
 
 term-use is **two parts**:
 
 1. the **CLI** (`term-use`) — the tool your agent drives, and
-2. the **agent skill** (`debugging-interactive-terminals`) — the manual that teaches
+2. the **agent skill** (`terminal-operation`) — the manual that teaches
    your agent *when and how* to drive it.
 
 Install **both**. There are two ways to do it — pick whichever fits.
@@ -21,7 +21,7 @@ Install **both**. There are two ways to do it — pick whichever fits.
 | Component | Version | Why |
 |---|---|---|
 | Python | **3.14+** | the development and E2E baseline; `requires-python` in `pyproject.toml` enforces it |
-| tmux | **3.x** | the service side. OSC 133 passthrough, SGR mouse and `remain-on-exit` behavior rely on 3.x |
+| tmux | **3.2a – 3.8** | the service side. Developed and regression-tested on **3.7c**; see the version notes below |
 | Pillow | any current release | optional. Only `screenshot` needs it; every other command is Pillow-free |
 
 Check what you have:
@@ -31,10 +31,19 @@ python3 --version
 tmux -V
 ```
 
-No tmux? Install it with the system package manager first (`pkg install tmux` on
-Termux, `apt install tmux` on Debian/Ubuntu, `brew install tmux` on macOS). GNU
-screen is not a substitute — term-use drives panes through tmux's own
-interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
+No tmux? Install it with the system package manager first (`apt install tmux` on
+Debian/Ubuntu, `brew install tmux` on macOS, `pkg install tmux` on Termux/Android,
+`dnf install tmux` on Fedora). GNU screen is not a substitute — term-use drives panes
+through tmux's own interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
+
+**What changes across tmux versions** (measured, not assumed):
+
+| Your tmux | What that means here |
+|---|---|
+| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux |
+| 3.7 / 3.7a / 3.7b / 3.7c | no difference that matters — the OSC 133 handling and `capture-pane -F` flags are identical across the patch line |
+| 3.8 or newer | additionally exposes `pane_command_status` and command hooks; term-use does not depend on them, so nothing changes for you |
+| older than 3.2 | unsupported: `capture-pane -e` attribute fidelity and `send-keys -H` byte handling are not reliable there |
 
 term-use has **zero Python dependencies**. tmux is an external binary, not a
 pip package.
@@ -52,7 +61,7 @@ Copy one of these prompts and send it to your agent:
 ```text
 Read docs/en/installation.md in the term-use repo (https://github.com/uobe1/term-use)
 and install term-use by following it: install the `term-use` CLI and the
-`debugging-interactive-terminals` skill into my agent. Tell me what you did and where
+`terminal-operation` skill into my agent. Tell me what you did and where
 each part landed.
 ```
 
@@ -61,7 +70,7 @@ If the agent can only fetch URLs (not local files), use the raw link instead:
 ```text
 Read https://raw.githubusercontent.com/uobe1/term-use/main/docs/en/installation.md and
 install term-use by following it: install the `term-use` CLI and the
-`debugging-interactive-terminals` skill into my agent. Tell me what you did.
+`terminal-operation` skill into my agent. Tell me what you did.
 ```
 
 The agent follows the [Install steps](#install-steps) below — it installs the CLI
@@ -132,7 +141,7 @@ If `term-use --help` is not found after a uv install, uv's tool bin
 
 ### Step 2 — install the skill
 
-The skill is the `skills/debugging-interactive-terminals/` directory in this repo.
+The skill is the `skills/terminal-operation/` directory in this repo.
 Copy or symlink it into your agent's skills directory so the agent can find it.
 
 | Agent | Skills directory |
@@ -147,15 +156,15 @@ Copy or symlink it into your agent's skills directory so the agent can find it.
 From the repo root, symlink (recommended — stays current with `git pull`):
 
 ```bash
-ln -s "$PWD/skills/debugging-interactive-terminals" \
-      ~/.codebuddy/skills/debugging-interactive-terminals
+ln -s "$PWD/skills/terminal-operation" \
+      ~/.codebuddy/skills/terminal-operation
 ```
 
 …or copy:
 
 ```bash
-cp -r "$PWD/skills/debugging-interactive-terminals" \
-      ~/.codebuddy/skills/debugging-interactive-terminals
+cp -r "$PWD/skills/terminal-operation" \
+      ~/.codebuddy/skills/terminal-operation
 ```
 
 (Replace `~/.codebuddy/skills` with your agent's directory from the table above.)
@@ -169,7 +178,7 @@ triggers automatically by description — no further setup.
 term-use sessions
 # → [] — or a JSON array of existing tmux sessions; both are success
 
-ls ~/.codebuddy/skills/debugging-interactive-terminals/SKILL.md   # skill present
+ls ~/.codebuddy/skills/terminal-operation/SKILL.md   # skill present
 ```
 
 A real end-to-end check that the CLI *and* the method work:
@@ -233,7 +242,7 @@ python3 -m pip uninstall term-use
 Remove the skill from your agent's skills directory:
 
 ```bash
-rm -rf ~/.codebuddy/skills/debugging-interactive-terminals
+rm -rf ~/.codebuddy/skills/terminal-operation
 ```
 
 Recordings under `$XDG_STATE_HOME/term-use/` are plain files; delete the
@@ -277,7 +286,7 @@ between `start` and the later command — keep it stable.
 
 The skill symlink/copy may be in the wrong directory, or the agent session started
 before the skill was added. Confirm
-`~/.codebuddy/skills/debugging-interactive-terminals/SKILL.md` exists (adjust the
+`~/.codebuddy/skills/terminal-operation/SKILL.md` exists (adjust the
 path for your agent), then restart the agent or open a fresh session.
 
 ### Sessions "disappear" between commands
@@ -290,7 +299,7 @@ for the whole working session.
 
 - Issues: https://github.com/uobe1/term-use/issues
 - Driving patterns for agents: [usage.md](usage.md)
-- Agent skill manual: [SKILL.md](../../skills/debugging-interactive-terminals/SKILL.md)
+- Agent skill manual: [SKILL.md](../../skills/terminal-operation/SKILL.md)
 
 When filing a bug, paste the structured error JSON verbatim — it already contains the
 screen snapshot, cursor position and raw-stream tail needed to reproduce.

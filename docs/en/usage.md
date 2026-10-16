@@ -10,11 +10,12 @@ works the same way.
    action, `wait` for the condition you expect before the next one.
 2. **Know what your evidence is worth.** `fact` (terminal protocol) beats
    `inference` (screen regex) beats `heuristic` (quiet sampling). Prefer fact;
-   treat heuristic as "probably safe".
-3. **Pick the right observation channel.** Attribute/semantic questions ("which
-   item is selected", "what color is it") → `screen`. Spatial questions ("what
-   does the frame look like", "where is the dialog drawn") → `screenshot`.
-   Alternate freely.
+   treat heuristic as "probably safe". `--done` makes that choice for you.
+3. **Take the cheapest observation that settles the question.** Attribute and
+   text questions ("which item is selected", "what color", "where do I click") →
+   `screen`; "what did it print" → `out`; "what did the screen look like then" →
+   `replay`. Spatial/layout questions → `screenshot`, once. Every result says
+   what it cost your context.
 
 ## The basic workflow
 
@@ -22,28 +23,32 @@ works the same way.
 TD="term-use"   # or: PYTHONPATH=/path/to/repo/src python3 -m termuse
 
 $TD start -n demo --cmd bash --width 100 --height 30
-$TD wait  -n demo --shell-ready --timeout 10
 $TD send  -n demo --type "make build" --key Enter
-$TD wait  -n demo --cmd-done --expect-code 0 --timeout 120
-# → {"verdict": "met", "confidence": "fact", "exit_code": 0, ...}
+$TD wait  -n demo --done --expect-code 0 --timeout 120
+# → {"verdict": "met", "confidence": "fact", "via": "osc133", "exit_code": 0, ...}
+$TD out   -n demo                       # what it printed, inside a context budget
 ```
 
-That is the whole loop: **start → shell-ready → send → wait for fact → act.**
+That is the whole loop: **start → send → wait for fact → read the output → act.**
 
-- `--shell-ready` sends a `true` probe and waits until the shell answers (fact).
-  Use it right after `start`: bash's first startup emits a done-marker with no
-  preceding command, so a bare `--cmd-done` there would always time out. After
-  leaving a nested program, the same probe confirms the shell took input back —
-  a live interactive program swallows the probe, and the wait fails with the
-  `shell-not-ready` code instead of pretending.
-- `--cmd-done` scans the pane's raw output stream for OSC 133 markers injected
-  into bash; the exit code comes from the shell protocol → confidence `fact`.
+- `--done` waits for the last thing you sent to finish, choosing the strongest
+  oracle the target actually supports and reporting it in `via`: the shell's
+  OSC 133 done-marker (fact, with exit code) → the `true` probe when nothing has
+  been sent yet → pane death when the program *is* the pane → quiet sampling
+  (heuristic, and it says so). `advice` names a stronger channel when the target
+  could support one.
+- `--shell-ready` is that probe on its own. After leaving a nested program it
+  confirms the shell took input back — a live interactive program swallows the
+  probe, and the wait fails with `shell-not-ready` instead of pretending.
+- The shell protocol behind `--cmd-done` is injected for bash and zsh; fish ≥ 4.0
+  emits the markers itself and term-use notices rather than assuming. A shell
+  that cannot emit them (plain `sh`/`dash` — no pre-exec hook) gets a structured
+  `no-shell-integration`, so fall back to `--until` on the program's own output,
+  or `--exit` on pane death.
 - A wrong `--expect-code` fails **immediately** with `expect-code-mismatch` —
   no timeout burn.
 - Pane death mid-wait fails immediately (`pane-dead` / `pane-dead-by-signal`
   with a respawn hint).
-- Non-bash session → structured `no-shell-integration` error; fall back to
-  `--until` anchored on the program's own output marker.
 
 ## Usage
 
@@ -51,12 +56,26 @@ That is the whole loop: **start → shell-ready → send → wait for fact → a
 
 | Situation | Wait with |
 |---|---|
+| Did the thing I just sent finish? what code? | **`--done [--expect-code N]`** — picks the strongest oracle this target supports and reports `via` + `exit_code` |
 | Is the shell ready / back in control? | `--shell-ready` — the `true` probe (fact); timeout → `shell-not-ready` |
-| Did the shell command finish? what code? | `--cmd-done [--expect-code N]` — always prefer |
+| Did the shell command finish? what code? | `--cmd-done [--expect-code N]` — the OSC 133 channel `--done` uses when it can |
 | Did the program exit or crash? | `--exit [--expect-code N]` (signal name in evidence) |
 | A known output marker appears | `--until 'regex'` (`--scrollback N` extends history) |
+| …and it must be *new* output, not text left on screen | `--until 'regex' --since-send` |
 | No marker exists (animated TUI) | `--quiet-ms 800`, at 2-3x the observed frame period |
 | Several things must hold | pass multiple conditions in one `wait` (AND; verdict takes the weakest confidence) |
+
+`--done` exists because `--until` is the flag people reach for and the weakest
+of the ones that fit: a screen regex proves *some text is on screen*, which your
+own echo can satisfy. Where the shell can prove completion, `--done` uses that;
+where it cannot (a non-integrated shell, an unmanaged pane) it degrades to quiet
+sampling and says so, with `advice` naming what would give you more.
+
+```bash
+$TD send -n demo --type "make build" --key Enter
+$TD wait -n demo --done --expect-code 0 --timeout 120
+# → {"verdict":"met","confidence":"fact","via":"osc133","exit_code":0, ...}
+```
 
 ### Typing text, keys, raw bytes
 
@@ -99,16 +118,21 @@ $TD click -n demo 12 40           # SGR click, 1-based coords
 `click` is 1-based while curses programs print 0-based coords — mind the
 off-by-one.
 
-### Observing: text vs image channel
+### Observing: text, output, history, image
 
 ```bash
-$TD screen -n demo --meta                          # cursor, modes, history, alt-screen
+$TD screen -n demo --meta                          # cursor, modes, history, blank, stall signals
 $TD screen -n demo --runs                          # SGR attribute runs (token-cheap)
 $TD screen -n demo --grep --fg red                 # attribute search (flag, not a text grep)
 $TD screen -n demo --grep --attr reverse           # e.g. locate a menu's highlighted row
 $TD screen -n demo --find "Cancel"                 # literal text → 1-based coords
 $TD screen -n demo --element-at 40 12              # what is this cell?
-$TD screenshot -n demo --format png -o pane.png    # spatial layout (needs Pillow)
+$TD out -n demo                                    # what printed since my last send, budgeted
+$TD out -n demo --json --max-bytes 4000            # structured, with the elision counted
+$TD replay -n demo --at 3.5                        # the screen as it was at t=3.5s
+$TD replay -n demo --at last-send --format png -o old.png
+$TD screenshot -n demo                             # spatial layout (needs Pillow; -o optional)
+$TD clear -n demo                                  # reclaim screen + scrollback before the next read
 $TD trace -n demo                                  # project raw.log: input/output/sync events
 ```
 
@@ -123,8 +147,33 @@ coordinates — the locate-then-click flow is a single hop:
 $TD click -n demo 12 7                             # feed the coords straight in
 ```
 
+Columns are counted the way the pane counts them: a double-width glyph (CJK,
+emoji) occupies two columns and tmux emits no padding cell for the second one, so
+`--find`/`--element-at`/the image all agree with what you see rather than with the
+character count. Cells carry `w`, and the reserved half appears as a `pad` stub.
+
+**Which channel.** Text channels are exact and cheap; the image channel answers
+the one question they cannot — *how is this frame laid out* — and costs more every
+time you look at it. Measured against the intuition that a multimodal model should
+prefer pictures: in OSWorld, agents on text/a11y observations scored 12.24% vs
+5.26% on screenshots, and stacking screenshot history is what degraded. So: text
+by default, one screenshot per layout question, never a running series.
+
+**Every observation states its cost.** JSON results carry a `context` block —
+`bytes` (exact), `est_tokens` + `method` (an estimate: `bytes/4` for text,
+pixels/750 for an image), `budget`, `over_budget` — and an over-budget capture
+adds a stderr note naming `clear` as the way out, because a fat pane is
+re-carried by every later read. `TERM_USE_CONTEXT_BUDGET` retunes the threshold.
+
+`screenshot` reports what it could not draw (`glyphs.missing`, with codepoints)
+instead of quietly emitting tofu: blocks, box drawing, Powerline separators and
+braille are drawn as geometry, other characters go through a font chain resolved
+by each face's own cmap, and the cursor is outlined unless you pass `--no-cursor`.
+
 `screen --meta`'s `pane_current_path` is the real cwd; the prompt on screen may
-abbreviate (`~/.../`) — that is the shell's PS1, not a display bug.
+abbreviate (`~/.../`) — that is the shell's PS1, not a display bug. Its
+`blank` / `unexecuted_input` / `last_output_age_s` answer the question a blank
+screen otherwise leaves open: is the program quiet, or did my input never land?
 
 ### Nested tmux and unmanaged panes
 
@@ -237,4 +286,4 @@ $TD stop  -n nano-demo
 
 - Issues: https://github.com/uobe1/term-use/issues
 - Install problems: [installation.md](installation.md)
-- Full scenario library: [SKILL.md](../../skills/debugging-interactive-terminals/SKILL.md)
+- Full scenario library: [SKILL.md](../../skills/terminal-operation/SKILL.md)

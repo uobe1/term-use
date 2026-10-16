@@ -32,12 +32,12 @@ inside a real tmux pane and gets verdicts, not vibes:
   kept on disk as ground truth: injections, output bytes, sync points.
 
 Because skills trigger by description, your agent doesn't need special instructions —
-it reads [the skill](skills/debugging-interactive-terminals/SKILL.md) and just works.
+it reads [the skill](skills/terminal-operation/SKILL.md) and just works.
 
 ## Installation
 
 term-use is **two parts**: the `term-use` CLI and the
-`debugging-interactive-terminals` agent **skill**. Install both.
+`terminal-operation` agent **skill**. Install both.
 
 **Automatic (recommended for agents).** Point your agent at the install doc and let it
 do the work — paste this into Claude Code / CodeBuddy / Codex / Cursor / any agent
@@ -46,7 +46,7 @@ that can read a file or URL. Repo: **https://github.com/uobe1/term-use**
 ```text
 Read docs/en/installation.md in the term-use repo
 (https://github.com/uobe1/term-use) and install term-use by following it:
-install the `term-use` CLI and the `debugging-interactive-terminals` skill into
+install the `term-use` CLI and the `terminal-operation` skill into
 my agent. Tell me what you did.
 ```
 
@@ -57,16 +57,20 @@ If the agent can only fetch URLs (not local files), use the raw link instead:
 yourself (CLI + skill); the doc is written so an AI agent or a human can follow it
 end-to-end.
 
-**Requirements:** Python **3.14+** (stdlib only) and **tmux 3.x** on `PATH`; Pillow
-optional (screenshots only).
+**Requirements:** Python **3.14+** (stdlib only) and **tmux 3.x** on `PATH` (developed and
+regression-tested on 3.7c; the [install doc](docs/en/installation.md) lists what each version
+line changes). Pillow optional (screenshots only).
 
 ## The agent skill
 
-The repo ships `skills/debugging-interactive-terminals/` — an agent-facing manual of
-usage patterns and hard-won pitfalls. It is installed automatically as part of
-[Installation](#installation) (copied/linked into your agent's skills directory) and
-triggers by description, so your agent just works. Read it standalone:
-[SKILL.md](skills/debugging-interactive-terminals/SKILL.md).
+The repo ships `skills/terminal-operation/` (终端操作) — an agent-facing manual of usage
+patterns and hard-won pitfalls. It is not a debugging-only document: it covers any hands-on
+terminal work your agent does — driving an interactive program, **running real tests and E2E
+scenarios to completion**, reproducing an issue, confirming a command finished with its exit
+code, reading or screenshotting a screen, and keeping the context bill down. It is installed
+automatically as part of [Installation](#installation) (copied/linked into your agent's skills
+directory) and triggers by description, so your agent just works. Read it standalone:
+[SKILL.md](skills/terminal-operation/SKILL.md).
 
 ## The basic workflow
 
@@ -139,5 +143,5 @@ of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 ## Documentation
 
 - Agent-facing user manual:
-  [skills/debugging-interactive-terminals/SKILL.md](skills/debugging-interactive-terminals/SKILL.md)
+  [skills/terminal-operation/SKILL.md](skills/terminal-operation/SKILL.md)
 - Usage guide: [docs/en/usage.md](docs/en/usage.md)

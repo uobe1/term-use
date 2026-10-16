@@ -90,6 +90,36 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   `last_send_offset` is a byte offset into `raw.log`, never a timestamp.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
+### tmux compatibility
+
+tmux is the only hard dependency, and the tool leans on its behavior details
+(`pipe-pane`, `remain-on-exit`, `capture-pane -e/-N/-J/-S`, `display-message -p` formats,
+`send-keys` semantics), so the supported line is stated rather than implied:
+
+| tmux | what holds |
+|---|---|
+| 3.2a – 3.7c | the supported baseline; developed and regression-tested on **3.7c** |
+| 3.7 / 3.7a / 3.7b / 3.7c | no drift that matters here: `input_osc_133()` is byte-identical across the patch line, and `capture-pane -F`'s flag vocabulary (`D H O P W X`) is the same. `wait-for` has **no** `-t` timeout and no way to list waiters |
+| 3.8 | adds `pane_command_status` / `_running` / `_duration` / `_start_time` and the `pane-command-started` / `pane-command-finished` / `pane-shell-prompt` hooks, and fixes the `wait-for` client leak (tmux #5614) |
+
+Two consequences that have already cost someone a wrong design:
+
+- **tmux ≤ 3.7c cannot answer "did the command finish".** Its OSC 133 parser handles only `A`
+  and `C` and discards the exit code in `D;<code>`, so `#{pane_command_status}` is not a fact
+  oracle there — it expands to empty *because the format does not exist*, and tmux expands
+  every unknown format to empty. Any code that does use those formats must version-gate and cap
+  older servers at `heuristic`.
+- **Never trust a zero exit code from tmux.** A client that cannot reach its server can print
+  `access not allowed` / `couldn't create directory … (Not a directory)` and still exit 0
+  (measured on 3.7c). `tmuxio.ok()` — exit 0 *and* clean stderr — is the only success test.
+
+Version-dependent behavior we work around rather than assume: `send-keys -H` drops multi-byte
+arguments on 3.x (the CLI splits one byte per `-H`), and `#{pane_dead_signal}` answers a bare
+number on some builds ("9") and a name on others ("KILL") — normalized by `tmuxio.signal_name()`.
+
+When you add an assumption about tmux, add the e2e assertion that pins it for the versions you
+claim, and say which line it does *not* hold for.
+
 ### Dependencies
 
 Python 3.14 **stdlib only**; tmux is the only external hard dependency; Pillow stays
@@ -98,7 +128,7 @@ issue first.
 
 ### Real-world pitfalls → update the skill
 
-`skills/debugging-interactive-terminals/SKILL.md` ("Common Mistakes") encodes
+`skills/terminal-operation/SKILL.md` ("Common Mistakes") encodes
 hard-won behavioral findings (echo-anchored waits, spinner/quiet resonance, menu
 arrow debounce, kitty key encodings, …). If you fix a real-world pitfall, update the
 skill in the same PR so agents benefit immediately.
