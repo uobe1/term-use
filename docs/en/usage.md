@@ -345,6 +345,13 @@ only — nothing is mocked.
   --key Up` in one call moves the selection **once** — use
   `send --key Up --repeat N --delay S` (each repetition a separate send with a
   precise gap).
+- **One exit code, one part of the line** — `wait --done` answers for the *line*
+  you sent, so on `false; echo ok` it correctly reports `exit_code: 0` and the
+  `false` is invisible. The verdict now says so: a compound line (`;`, `&&`, `|`,
+  `&`) gets a `note` naming what the number covers. A `;` inside quotes is data,
+  so `python3 -c 'import time; …'` stays a single command with nothing to caveat.
+  Keep verification reads *inside* the line (`step && cat artifact`) when you want
+  one fact to cover both, or split the sends when you want one code each.
 - **Long typed text wraps** — a ~90-char `--type` wraps on a 100-col pane; a
   `--until` pattern spanning that text must match the *wrapped* screen, or keep
   sent commands short and let the program print the marker.

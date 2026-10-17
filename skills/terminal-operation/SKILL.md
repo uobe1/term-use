@@ -63,7 +63,9 @@ opening `raw.log` yourself.
 - **Re-running is itself a write.** Before repeating a silent command, ask if it is
   idempotent — usually not; a second run corrupts state while both exits still read 0.
   Chain the proof onto the step instead of repeating it: `step && cat artifact`. One send
-  then carries both the write and the read that shows it landed once.
+  then carries both the write and the read that shows it landed once — and a met `--done`
+  on any compound line puts a `note` in the verdict saying which part its `exit_code`
+  describes, because one number cannot cover the whole line.
 - **Existence is not content.** `sqlite3.connect("x.db")` creates an empty file the moment
   a check opens it. Assert what only the program could have written (rows, a version
   pragma, a byte count), never a path. Reading program-written state is legitimate
