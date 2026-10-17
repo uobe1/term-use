@@ -137,10 +137,22 @@ issue first.
 
 ### Real-world pitfalls → update the skill
 
-`skills/terminal-operation/SKILL.md` ("Common Mistakes") encodes
+`skills/terminal-operation/SKILL.md` ("Traps", "Failure codes") encodes
 hard-won behavioral findings (echo-anchored waits, spinner/quiet resonance, menu
-arrow debounce, kitty key encodings, …). If you fix a real-world pitfall, update the
-skill in the same PR so agents benefit immediately.
+arrow debounce, `$?` expanded before tmux sees it, kitty key encodings, …). If you fix
+a real-world pitfall, update the skill in the same PR so agents benefit immediately.
+
+The skill is **two-layer and priced per token**: the core `SKILL.md` is what every
+session loads, so it stays short (~150 lines) and carries only what an agent needs
+before acting; `references/*.md` are loaded at the moment the core names them. New
+detail goes into a reference unless it changes a decision; rationale and measurements go
+into the repo docs, not the skill body. Do not state a rule twice.
+
+Is a skill revision actually better? `tests/blind/ab_skill.sh` answers that with agents
+rather than opinion — objective verdict from the fixture's end state, weighted confusion
+self-report, plus wall clock / tokens / context bytes. Baselines are pinned by
+`OLD_SKILL_REF`; runs are archived under `~/evidence/term-use/ab/` with an `INDEX.md`
+entry, because an unarchived experiment is a story.
 
 ## Commit messages
 

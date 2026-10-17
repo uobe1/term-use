@@ -9,7 +9,7 @@ description = "Evidence-driven CLI that lets agents drive and debug interactive 
 readme = "README.md"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-authors = [{ name = "Uobe" }]
+authors = [{ name = "uobe1" }]
 requires-python = ">=3.14"
 keywords = ["tmux", "terminal", "agent", "automation", "tui", "debugging", "cli"]
 classifiers = [

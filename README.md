@@ -2,12 +2,9 @@
 
 term-use is an evidence-driven CLI that gives your coding agents complete control
 over **interactive terminal programs** — shells, nano/vim, REPLs, animated TUIs
-(ink / bubbletea), even nested tmux — and replaces guessing with proof. Built
-agent-first, in the spirit of open-source AI-skill projects like
-[superpowers](https://github.com/obra/superpowers) and
-[anthropics/skills](https://github.com/anthropics/skills): the docs are written *for
-the agent*, the CLI is the tool interface, and every answer comes with evidence
-attached.
+(ink / bubbletea), even nested tmux — and replaces guessing with proof. It is built
+agent-first: the documentation is written *for* the agent, the CLI is its tool
+interface, and every answer arrives with evidence attached.
 
 ![version](https://img.shields.io/badge/version-2.0.0a5-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
@@ -151,7 +148,7 @@ Bug reports, docs and code are welcome — please use **issues + pull requests**
 
 ## License
 
-Copyright (C) 2026 Uobe
+Copyright (C) 2026 uobe1
 
 Released under the **GNU General Public License v3.0 or later** (SPDX identifier:
 `GPL-3.0-or-later`). See [LICENSE](LICENSE). This program is distributed in the hope
