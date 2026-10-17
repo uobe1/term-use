@@ -2,10 +2,18 @@
 # A/B harness: does a skill revision actually make agents better at terminal
 # work? Same code, same machine, same task — only the skill text changes.
 #
-#   TASK=todo   bash tests/blind/ab_skill.sh prepare old /tmp/ab-old
 #   TASK=writes bash tests/blind/ab_skill.sh prepare old /tmp/ab-old
+#   TASK=writes bash tests/blind/ab_skill.sh prepare new /tmp/ab-new
 #   TASK=writes bash tests/blind/ab_skill.sh prompt  old /tmp/ab-old
-#   TASK=writes bash tests/blind/ab_skill.sh score         /tmp/ab-old /tmp/STATE/term-use
+#   TASK=writes bash tests/blind/ab_skill.sh score         /tmp/ab-old /tmp/ab-old/tmp/state/term-use
+#           bash tests/blind/ab_skill.sh confusion   /tmp/ab-old-report.txt
+#           bash tests/blind/ab_skill.sh archive /tmp/ab-old <evidence-dir> /tmp/ab-old-report.txt
+#
+# The baseline arm is whatever OLD_SKILL_REF points at; the treatment arm gets
+# the working tree's skill DIRECTORY (core + references/), because a revision
+# that splits into references has to be shipped as a directory to be measured
+# fairly. Pin the baseline for a round with e.g.
+#   OLD_SKILL_REF=8f18bfb:skills/terminal-operation/SKILL.md   # the 2.0.0a5 core
 #
 # Two tasks, because they measure different things:
 #
@@ -62,8 +70,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OLD_SKILL_REF="bfab8fa:skills/debugging-interactive-terminals/SKILL.md"
-NEW_SKILL="skills/terminal-operation/SKILL.md"
+# Baseline default: the skill as it stood before this line of work existed. Any
+# round can pin a different one via the environment — compare against 2.0.0a5
+# with OLD_SKILL_REF=8f18bfb:skills/terminal-operation/SKILL.md
+OLD_SKILL_REF="${OLD_SKILL_REF:-bfab8fa:skills/debugging-interactive-terminals/SKILL.md}"
 TASK="${TASK:-todo}"
 
 cmd="${1:-}"
@@ -73,13 +83,15 @@ cmd="${1:-}"
 case "$cmd" in
   prepare | prompt) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
   score | confusion) arm=""; dir="${2:-}"; extra="${3:-}" ;;
+  archive) arm="$(basename "${2:-}" | sed 's/^ab-//; s/-r[0-9]*$//')"; dir="${2:-}"; extra="${3:-}"; report="${4:-}" ;;
   *) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
 esac
 
-skill_src() {
+install_skill() {   # $1 = arm, $2 = dest dir
+  mkdir -p "$2"
   case "$1" in
-    old) git -C "$ROOT" show "$OLD_SKILL_REF" ;;
-    new) cat "$ROOT/$NEW_SKILL" ;;
+    old) git -C "$ROOT" show "$OLD_SKILL_REF" > "$2/SKILL.md" ;;
+    new) cp -r "$ROOT/skills/terminal-operation/." "$2/" ;;
     *) echo "unknown arm: $1" >&2; exit 2 ;;
   esac
 }
@@ -118,7 +130,7 @@ EOF
 case "$cmd" in
 prepare)
   mkdir -p "$dir/skill" "$dir/app"
-  skill_src "$arm" > "$dir/skill/SKILL.md"
+  install_skill "$arm" "$dir/skill"
   case "$TASK" in
     todo)
       cp "$ROOT/tests/fixtures/todo/todo.js" "$dir/app/todo.js"
@@ -132,13 +144,15 @@ prepare)
       ;;
     *) echo "unknown TASK: $TASK (todo|writes)" >&2; exit 2 ;;
   esac
-  echo "prepared $arm/$TASK in $dir ($(wc -l < "$dir/skill/SKILL.md") skill lines)"
+  echo "prepared $arm/$TASK in $dir (core $(wc -l < "$dir/skill/SKILL.md") lines, $(wc -c < "$dir/skill/SKILL.md") bytes; references $(find "$dir/skill/references" -name '*.md' 2>/dev/null | wc -l) files)"
   ;;
 
 prompt)
   cat <<EOF
 You are testing a terminal-operation CLI. Read the skill at $dir/skill/SKILL.md
-first — it is your only documentation about the tool. Then complete this task:
+first — it is your only documentation about the tool. If it points you to files
+under $dir/skill/references/, they are part of that same documentation: load one
+only at the moment it says to, and never all of them at once. Then complete this task:
 
 $( [ "$TASK" = writes ] && prompt_writes || prompt_todo )
 
@@ -250,7 +264,30 @@ print('verdict=' + ('BOTH_FIXED' if d and r else 'PARTIAL' if (d or r) else 'NOT
     *) echo "unknown TASK: $TASK (todo|writes)" >&2; exit 2 ;;
   esac
   ;;
+archive)
+  # `archive <arm-dir> <evidence-dir> [report-file]` — a run that is not kept is
+  # not auditable. Copies the arm's skill, its end state, term-use's own
+  # recordings and the environment that produced them, so a later reader can
+  # tell what was measured on what, without trusting anyone's summary.
+  DEST="$extra"
+  [ -d "$dir" ] && [ -n "$DEST" ] || { echo "usage: archive <arm-dir> <evidence-dir> [report]" >&2; exit 2; }
+  mkdir -p "$DEST"
+  cp -r "$dir/skill" "$DEST/skill" 2>/dev/null || true
+  mkdir -p "$DEST/app" && cp -a "$dir/app/." "$DEST/app/" 2>/dev/null || true
+  mkdir -p "$DEST/recordings"
+  for raw in $(find "$dir" -name raw.log 2>/dev/null); do
+    session=$(basename "$(dirname "$raw")")
+    mkdir -p "$DEST/recordings/$session"
+    cp -a "$raw" "$(dirname "$raw")/state.json" "$DEST/recordings/$session/" 2>/dev/null || true
+  done
+  [ -n "$report" ] && cp "$report" "$DEST/report.txt"
+  { echo "arm=$arm  task=$TASK  when=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "tmux=$(tmux -V 2>&1)  python=$(python3 -V 2>&1)  arch=$(uname -m)"
+    echo "repo_head=$(git -C "$ROOT" rev-parse --short HEAD)  tree_dirty=$(git -C "$ROOT" status --porcelain | wc -l)"
+  } > "$DEST/env.txt"
+  echo "archived $dir -> $DEST ($(find "$DEST" -type f | wc -l) files)"
+  ;;
 *)
-  sed -n '1,40p' "$0"
+  sed -n '1,45p' "$0"
   ;;
 esac
