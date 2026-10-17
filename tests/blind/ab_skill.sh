@@ -31,6 +31,25 @@
 # Ground truth lives in tests/fixtures/ab_write/protected/spec.json, outside the
 # arm's writable tree: BenchJack audited 4,458 tasks and found every public
 # benchmark hackable, most often by reaching the checker.
+#
+# Two axes on purpose. OBJECTIVE (verdict, re-send count, tokens, context bytes,
+# wall clock) says what happened; SUBJECTIVE (`confusion`, below) says what it
+# felt like from inside the agent, which is the only way to see a tool that was
+# *used correctly but understood badly*. Confusion is six dimensions, each 0-10
+# (10 = maximally confused), weighted into one 0-10 score:
+#
+#   route     0.25  which subcommand/flag was the right one, unclear
+#   evidence  0.25  unsure whether what I got actually proves what I claimed
+#   state     0.20  unsure what the pane/program was doing at this moment
+#   message   0.15  output or error text hard to interpret, or misleading
+#   doc       0.10  had to hunt through the skill and did not find the answer
+#   recovery  0.05  after a surprise, unsure how to get back on track
+#
+# route+evidence+state carry 70% because that is what this tool sells: a decision
+# you can trust. Self-report is biased (an agent that never read the doc cannot
+# rate how confusing it was), so `confusion` prints the weights and every
+# dimension next to the objective numbers — the disagreement is the signal, not
+# an error to smooth over.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,7 +57,15 @@ OLD_SKILL_REF="bfab8fa:skills/debugging-interactive-terminals/SKILL.md"
 NEW_SKILL="skills/terminal-operation/SKILL.md"
 TASK="${TASK:-todo}"
 
-cmd="${1:-}"; arm="${2:-}"; dir="${3:-}"; extra="${4:-}"
+cmd="${1:-}"
+# prepare/prompt take an arm AND a dir; score/confusion take a dir only, so the
+# slots must not be positional across commands — `score /tmp/ab-old <statedir>`
+# used to land the state dir in $dir and look for /tmp/<statedir>/app.
+case "$cmd" in
+  prepare | prompt) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
+  score | confusion) arm=""; dir="${2:-}"; extra="${3:-}" ;;
+  *) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
+esac
 
 skill_src() {
   case "$1" in
@@ -69,7 +96,7 @@ Reach this end state, and nothing else:
   * the sync has genuinely completed, in whatever way the program itself
     records completion.
 
-`$dir/app/protected/` is not yours: do not read it, do not copy from it, do not
+\`$dir/app/protected/\` is not yours: do not read it, do not copy from it, do not
 write to it. The auditor's ground truth lives outside this directory either way,
 so nothing in your tree can shortcut the check.
 
@@ -121,9 +148,63 @@ Rules:
     so be honest: a blind sleep you forgot to count is a bug in the report, not
     in the tool.
   - Report exactly one CLAIM line: what you believe the end state is.
+  - Report exactly one CONFUSION line, in this format and nothing else:
+      CONFUSION route=<0-10> evidence=<0-10> state=<0-10> message=<0-10> doc=<0-10> recovery=<0-10>
+    0 = never uncertain, 10 = guessing the whole way. Rate yourself on what
+    actually happened, not on how you wish the tool looked: a run where you
+    quietly re-read a screen three times because you did not trust the first
+    reading is a high \`evidence\` score, and hiding that makes the measurement
+    wrong rather than you look bad.
+  - Then one WHY line per dimension, same order, with the concrete moment:
+      WHY route: <what you could not decide, and what you did about it>
+      WHY evidence: ...
+      WHY state: ...
+      WHY message: ...
+      WHY doc: ...
+      WHY recovery: ...
+    A bare number with no moment behind it is worth nothing to the maintainer.
   - Finish with exactly one line: FEEDBACK: <what confused you, what was missing,
     what you had to guess>.
 EOF
+  ;;
+
+confusion)
+  # $dir = a file (or directory) holding the arm's report text. The arithmetic is
+  # here so the model never computes its own composite.
+  python3 - "$dir" <<'PY'
+import os, re, sys
+
+WEIGHTS = [("route", .25), ("evidence", .25), ("state", .20),
+           ("message", .15), ("doc", .10), ("recovery", .05)]
+src = sys.argv[1]
+if os.path.isdir(src):
+    text = "".join(open(os.path.join(src, f), encoding="utf-8", errors="replace").read()
+                   for f in sorted(os.listdir(src)) if os.path.isfile(os.path.join(src, f)))
+else:
+    text = open(src, encoding="utf-8", errors="replace").read()
+m = re.search(r"CONFUSION([^\n]*)", text)
+if not m:
+    print("confusion=ABSENT (no CONFUSION line in the report)")
+    sys.exit(0)
+scores, missing = {}, []
+for name, _w in WEIGHTS:
+    k = re.search(rf"{name}\s*=\s*(\d{{1,2}})", m.group(1))
+    if k:
+        scores[name] = max(0, min(10, int(k.group(1))))
+    else:
+        missing.append(name)
+if missing:
+    print("confusion=INCOMPLETE missing=" + ",".join(missing))
+    scores = {n: scores.get(n, 0) for n, _ in WEIGHTS}
+total = sum(scores[n] * w for n, w in WEIGHTS) / sum(w for _n, w in WEIGHTS)
+print("scores " + " ".join(f"{n}={scores[n]}" for n, _ in WEIGHTS))
+for name, w in WEIGHTS:
+    reason = re.search(rf"WHY {name}\s*:\s*([^\n]+)", text)
+    print(f"  {name:9} w={w:.2f} {scores[name]:>2}/10  "
+          f"{(reason.group(1).strip()[:110] if reason else '(no WHY line)')}")
+print(f"confusion={total:.2f}/10  (weighted, "
+      f"{'partial — missing dimensions scored 0' if missing else 'all six rated'})")
+PY
   ;;
 
 score)

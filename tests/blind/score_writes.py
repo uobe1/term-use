@@ -26,15 +26,19 @@ SPEC_PATH = os.path.normpath(os.path.join(HERE, os.pardir, "fixtures",
 
 
 def ledger_state(app, spec):
+    want = spec["ledger"]["steps_in_order"]
     path = os.path.join(app, "ledger.csv")
     if not os.path.exists(path):
-        return {"rows": 0, "steps": [], "exists": False}
+        # An arm that never ran anything still has to be scoreable: a KeyError
+        # here would report "the checker broke" instead of "the agent left no
+        # ledger", and those are different findings.
+        return {"rows": 0, "steps": [], "exists": False, "header_ok": False,
+                "exact": False, "missing": list(want), "dupes": []}
     with open(path, newline="") as fh:
         parsed = list(csv.reader(fh))
     header, body = (parsed[0], parsed[1:]) if parsed and parsed[0][:1] == ["seq"] \
         else ([], parsed)
     steps = [r[1] for r in body if len(r) > 1]
-    want = spec["ledger"]["steps_in_order"]
     dupes = [s for s in set(steps) if steps.count(s) > 1]
     return {"rows": len(body), "steps": steps, "exists": True,
             "header_ok": header == spec["ledger"]["header"],
