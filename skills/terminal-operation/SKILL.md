@@ -65,14 +65,14 @@ and answers fewer questions about a terminal.
 | `wait -n N --done [--expect-code C]` | **the last thing you sent has finished** — strongest oracle available, verdict carries `via` + `exit_code` |
 | `wait -n N --cmd-done / --shell-ready / --exit / --until 're' / --quiet-ms 800` | the individual oracles: OSC 133 done (fact), `true` probe (fact), pane death (fact), screen regex (inference), stability sampling (heuristic) |
 | `wait … --until 're' --since-send` | match only output produced after the last send — no stale anchor can satisfy it |
-| `screen -n N [--meta] [-N] [-J] [--grid] [--runs] [--grep --attr A] [--find TEXT] [--element-at X Y]` | text channel; `--find` → 1-based click-ready coords (screen columns, wide glyphs counted correctly) |
-| `out -n N [--all] [--max-bytes K] [--json]` | what the pane printed since your last send, as text, head+tail with the elision marked |
+| `screen -n N [--meta] [-N] [-J] [--grid] [--runs] [--grep --attr A] [--find TEXT] [--element-at X Y]` | text channel; `--find` → 1-based click-ready coords (screen columns, wide glyphs counted correctly). `-J` joins the lines tmux wrapped at the right edge back into one logical line (read a long command or a wrapped table); `-N` keeps the trailing cells tmux would strip, which is what preserves a painted background and column alignment |
+| `out -n N [--all] [--max-bytes K] [--json]` | the pane's own byte stream since your last send, head+tail with the elision marked. It is the *pane*, so it contains your echoed input line and the prompt that follows — a trailing prompt with nothing after it means "the program said nothing", which is a result, not a failure to read |
 | `replay -n N --at 3.5\|offset:N\|last-send [--format text\|json\|png]` | the screen at an earlier moment, rebuilt by feeding raw.log back through tmux |
 | `screenshot -n N [-o p.png] [--format png\|jpg] [--font-size 16] [--no-cursor]` | image channel; `-o` optional (numbered file beside the session's evidence); reports `glyphs.missing` honestly |
 | `clear -n N [--history-only]` | reclaim the screen and scrollback before the next capture costs you again |
 | `mouse-detect -n N` / `click -n N X Y` | mouse mode (SGR) / click at 1-based coords |
 | `fix-tty -n N` | restore sane terminal (stty sane) after ECHO damage |
-| `trace -n N [--format json]` | project raw.log: input/output/sync events with timestamps |
+| `trace -n N [--format json]` | project raw.log. `text` (default) = a header line (`# v2 <WxH> cmd=…`) then `[ elapsed ] code NB 'preview'` per event, where `o` is pane output, `i` your injections, `m` sync points (`start`, `wait-met`); `json` = one asciicast-v2 array per line, `[elapsed, code, data]`, for parsing rather than reading. Usually you want `out` instead — trace is for *when* something happened, not what it said |
 | `sessions [--socket NAME]` / `stop -n N` | list sessions / kill session |
 
 Targets are `(socket, session, window, pane)`: `-n "sess"`, `"sess:win"`,
@@ -104,7 +104,10 @@ Two servers can answer the done-marker oracle: term-use's own scan of the record
 `pane_command_status`, `pane_command_duration`). The native one answers where the
 recording cannot: a pipe-pane that stopped, a prompt framework that took
 `PROMPT_COMMAND` back, or markers forwarded through ssh. On 3.2a–3.7c those keys are
-*absent*, not empty — absence is the version answer.
+*absent*, not empty — absence is the version answer, and `tmux -V` states it directly
+when you need to say it out loud. If your target is on an older server, ignore the
+`pane_command_*` rows below rather than hunting for them: nothing you can do here
+turns them on.
 
 When the fact channel is **structurally** unable to answer you get
 `shell-protocol-unavailable` instead of a timeout: the pane's foreground is a terminal
@@ -130,6 +133,28 @@ back?" after leaving a nested program — a live REPL swallows it, so it fails w
 Wrong `--expect-code` fails immediately (`expect-code-mismatch`), never after burning the
 timeout; pane death mid-wait fails immediately with `pane-dead` / `pane-dead-by-signal`
 (signal names are normalized — tmux answers "9" on some builds, "KILL" on others).
+
+## When the target is a plain CLI, not a TUI
+
+Everything further down is about screens that move. A `bun todo.js done 2` run inside a
+managed bash pane has different rules, and getting them wrong costs calls:
+
+- **Wait with `--done`.** The command finishes in milliseconds and `--done` still returns
+  `fact` with the real exit code — no oracle is stronger for this shape, and you do not
+  have to choose. `--exit` is the wrong one here: the pane *is* the shell and the shell
+  is not going to die.
+- **"It printed nothing and exited 0" is a finding, not a failed read.** That is exactly
+  what a silent no-op looks like: `out` shows your echoed command and the next prompt
+  with nothing between them. Report that as behavior. Do not re-send hoping it prints
+  something next time, and do not conclude your input was swallowed — `exit_code: 0`
+  says the shell ran it.
+- **Anchor on the program's own bytes, never on the prompt.** The prompt repaints after
+  every command, so `--until '$ '` is already true before you send anything.
+- **When the program writes an artifact, read the artifact.** A CLI that persists
+  `todos.json`/a db/ a file has the truth there; `send --type 'cat todos.json'` in the
+  same pane puts it in the recording, which is stronger evidence than the screen text.
+- **`clear -n N` between repro and verification** keeps the verification reads from
+  carrying the whole earlier session with them.
 
 ## Keeping the context bill down
 
@@ -161,8 +186,14 @@ capture is over budget the tool says so on stderr and names the fix.
   echoing filenames), don't wait on it: act, then verify by reading the screen.
 - **Stale anchors.** `--until` matches the *current* screen, so an anchor left by an earlier
   command satisfies a new wait instantly. Use `--since-send` to match only new output, or
-  `--done`. Beware also: your own shell expands `$VAR`/`$(...)` inside double quotes before the
-  text is injected, merging input and marker.
+  `--done`.
+- **Your own shell eats the text before tmux sees it.** `--type "echo exit=$?"` is quoted at
+  *your* side, so `$?` (or `$(…)`, or backticks) is expanded by the shell running term-use and
+  the pane faithfully runs the mangled command. The damage is that the evidence then looks
+  valid: the output really did say `exit=0`, it just never came from the program you meant to
+  test. Single-quote the whole value — `--type 'echo exit=$?'` — and when a result depends on
+  shell syntax, read back the echoed command line in `out`/`evidence.screen` before believing
+  the line under it.
 - **Trailing spaces.** The terminal rstrips lines, so `'your name: '` won't match raw text.
   `--until` self-heals (matches rstripped text plus a sentinel space) — trust it instead of
   writing a regex that requires trailing spaces to survive.

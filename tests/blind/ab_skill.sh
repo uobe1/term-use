@@ -11,6 +11,12 @@
 #   2. `rm <id>` calls splice(idx) with no delete count, wiping the tail
 # Both are checkable from the file state afterwards, which is the point: we
 # grade outcomes, not prose.
+#
+# Round 1 (2026-10-17, old skill bfab8fa vs current, same code): both arms
+# scored BOTH_FIXED, so this fixture cannot separate the arms on outcome — use
+# it for path quality (turns, wall clock, blind sleeps, tool-side context) and
+# reach for a harder target (a TUI with a debounce, or a data-corrupting menu
+# flow) when the question is "did it get more things right".
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

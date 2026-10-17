@@ -4,18 +4,29 @@ Complete guide for driving and debugging interactive terminal programs with
 term-use. Written for AI agents first — humans debugging a TUI will find it
 works the same way.
 
-## The three rules
+## The four rules
 
-1. **Wait for state, then act.** Never sleep, never guess a delay. After every
-   action, `wait` for the condition you expect before the next one.
+Defaults are part of the rules — they were decided so that nobody has to re-argue
+them per session.
+
+1. **Wait for state, then act. Default: `wait --done`, not `--until`.** Never sleep
+   instead of waiting. `--done` proves the command finished and carries its exit code;
+   `--until` proves only that some text is on screen, which your own echo can supply.
+   `--exit` is for when the program *is* the pane, `--shell-ready` asks "is the shell
+   back", `--quiet-ms` is for an animated TUI with nothing to anchor on.
 2. **Know what your evidence is worth.** `fact` (terminal protocol) beats
    `inference` (screen regex) beats `heuristic` (quiet sampling). Prefer fact;
-   treat heuristic as "probably safe". `--done` makes that choice for you.
-3. **Take the cheapest observation that settles the question.** Attribute and
+   treat heuristic as "probably safe". `--done` makes that choice for you and names
+   the channel it used in `via`.
+3. **Take the cheapest observation that settles the question. Default: the text
+   channels.** Attribute and
    text questions ("which item is selected", "what color", "where do I click") →
    `screen`; "what did it print" → `out`; "what did the screen look like then" →
    `replay`. Spatial/layout questions → `screenshot`, once. Every result says
    what it cost your context.
+4. **On a failure, read `hint` then `evidence`.** The hint is the tool's own diagnosis
+   and usually contains the exact next command; the evidence is the screen the tool
+   looked at while it decided.
 
 ## The basic workflow
 
@@ -109,6 +120,30 @@ tmux failure mode this CLI refuses to let you trigger. `--hex` is split one
 byte per `-H` (tmux 3.x drops multi-byte `-H`), so escape sequences arrive
 contiguously within a single call.
 
+**Quote on your side, not the pane's.** `--type "echo exit=$?"` is double-quoted by
+the shell that runs term-use, so `$?` — or `$(…)`, or a backtick — is expanded *before*
+tmux ever sees the text, and the pane then faithfully runs a command you never wrote.
+The result looks like evidence and is fabricated: the `exit=0` you read came from your
+own pipeline, not from the program under test. Single-quote values that contain shell
+syntax (`--type 'echo exit=$?'`), and when a claim depends on `$`-syntax, read the
+echoed command line back from `out` before believing the line under it.
+
+### Driving a plain CLI inside a shell pane
+
+Most of this guide is about programs with a screen. A non-interactive command run in a
+managed bash pane (`bun cli.js done 2`, `pytest -q`, `make`) has its own short answers:
+
+- `send` it, then `wait --done [--expect-code C]`. Milliseconds are fine; `fact` is
+  still `fact`. `--exit` is wrong here — the pane is the shell and the shell does not
+  die.
+- **"No output, exit 0" is a result.** A silent no-op bug looks like `out` returning
+  your echoed command and the next prompt with nothing between them. Report that; do
+  not re-send, and do not assume your keystrokes were swallowed.
+- Anchor `--until` on the program's own bytes, never on the prompt (the prompt repaints
+  after every command, so it is already matched before you send anything).
+- If the program writes an artifact, `send --type 'cat state.json'` and read it from the
+  recording — the file is the truth, the screen is a rendering of it.
+
 TUI menus **debounce arrow keys**: `send --key Up --key Up` in one call moves
 the selection **once**. Let the tool do the rhythm — each repetition is a full
 independent send with a precise gap:
@@ -151,6 +186,8 @@ $TD screen -n demo --meta                          # cursor, modes, history, bla
 #    running:true also describes a shell merely waiting for input, so read
 #    evidence.screen before acting on it. Absent (not empty) on 3.2a–3.7c.
 $TD screen -n demo --runs                          # SGR attribute runs (token-cheap)
+$TD screen -n demo -J                              # join the lines tmux wrapped at the right edge
+$TD screen -n demo -N                              # keep trailing cells (what a painted background needs)
 $TD screen -n demo --grep --fg red                 # attribute search (flag, not a text grep)
 $TD screen -n demo --grep --attr reverse           # e.g. locate a menu's highlighted row
 $TD screen -n demo --find "Cancel"                 # literal text → 1-based coords
@@ -161,8 +198,14 @@ $TD replay -n demo --at 3.5                        # the screen as it was at t=3
 $TD replay -n demo --at last-send --format png -o old.png
 $TD screenshot -n demo                             # spatial layout (needs Pillow; -o optional)
 $TD clear -n demo                                  # reclaim screen + scrollback before the next read
-$TD trace -n demo                                  # project raw.log: input/output/sync events
+$TD trace -n demo                                  # timeline: [elapsed] code NB 'preview' per event
+$TD trace -n demo --format json                    # same as NDJSON: [elapsed, code, data] per line
 ```
+
+`trace` answers **when** something happened: the header line reports the recording
+(`# v2 <cols>x<rows> cmd=…`), then `o` pane output, `i` your injections, `m` sync points
+(`start`, `wait-met`). `--format json` emits the raw asciicast-v2 arrays for parsing. For
+*what the program said*, `out` is the cheaper channel.
 
 `screen --find` returns every literal match with **1-based, click-ready**
 coordinates — the locate-then-click flow is a single hop:
