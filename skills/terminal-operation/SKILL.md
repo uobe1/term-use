@@ -82,8 +82,14 @@ learn it up front, look at it when something fails.
 
 Targets are `(socket, session, window, pane)`: `-n "sess"`, `"sess:win"`,
 `"sock:sess:win.pane"`. A session living on a named socket must be spelled that way or
-given `--socket`; `sessions --socket NAME` lists what exists. `wait` defaults:
+given `--socket`; `sessions --socket NAME` lists what exists. **`--socket` belongs on
+every subcommand**, not only on `sessions` — `start`/`send`/`wait`/`screen` all take it,
+and putting it before the subcommand is an argparse error. A private socket with no
+server yet is an empty list (`[]` plus a note on stderr), not a failure. `wait` defaults:
 `--timeout 10 --interval 0.1`. `--until` is Python `re` with DOTALL|MULTILINE.
+`send`'s `offset` is the byte position in the session's `raw.log` where this send's
+output begins — it is what `--done`/`--cmd-done` and `--since-send` scope to, so it is
+the number that makes a completion answer *yours* rather than the previous command's.
 `--grep` attr names: bold, dim, italic, underline, blink, reverse, strikethrough; fg/bg take
 color names, 256-palette indexes or `#rrggbb`. Single-letter program keys are text
 (`send --type q`); `--key` takes tmux key names only and errors with a table if you try one.
@@ -113,6 +119,12 @@ recording cannot: a pipe-pane that stopped, a prompt framework that took
 when you need to say it out loud. If your target is on an older server, ignore the
 `pane_command_*` rows below rather than hunting for them: nothing you can do here
 turns them on.
+
+**Scoping, in one sentence because both A/B arms had to derive it**: `--done` and
+`--cmd-done` only accept a completion marker that arrived *after your last send* (the
+byte offset `send` returns), so a marker left behind by an earlier command cannot satisfy
+them, and no `--since-send` is needed for them — that flag scopes `--until`, which is the
+channel that really can be fooled by old text.
 
 When the fact channel is **structurally** unable to answer you get
 `shell-protocol-unavailable` instead of a timeout: the pane's foreground is a terminal
@@ -158,6 +170,21 @@ managed bash pane has different rules, and getting them wrong costs calls:
 - **When the program writes an artifact, read the artifact.** A CLI that persists
   `todos.json`/a db/ a file has the truth there; `send --type 'cat todos.json'` in the
   same pane puts it in the recording, which is stronger evidence than the screen text.
+  Reading program-produced state is legitimate evidence — the red line is *editing* it.
+- **Existence is not content.** A verification command can create the thing it checks:
+  `sqlite3.connect("x.db")` writes an empty file the moment it opens it, so "the file is
+  there" proves only that you looked. Assert what only the program could have written (a
+  version pragma, a row set, a byte count), never a path.
+- **Re-running is itself a write.** Before sending a command again because it was silent,
+  ask whether it is idempotent — usually it is not, and the second run of a
+  non-idempotent step leaves a corrupted state with two `exit_code: 0` marks on it. If
+  you must retry, check the artifact first and say in your report that you retried.
+- **`--quiet-ms` answers pixels, not completion.** It settles when the screen has stopped
+  changing, which a silent long-running program satisfies while still working; the verdict
+  now carries `program_running: true` and a `note` when that is the case. Ask `--done` for
+  the completion question, and use `pane_current_command` + `last_output_age_s` from
+  `screen --meta` as the liveness pair — they work on every tmux version, unlike
+  `pane_command_running`.
 - **`clear -n N` between repro and verification** keeps the verification reads from
   carrying the whole earlier session with them.
 

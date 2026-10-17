@@ -90,8 +90,13 @@ reaching for `--until` first is the habit this tool exists to break.
 | Did the program exit or crash? | `--exit [--expect-code N]` (signal name in evidence) |
 | A known output marker appears | `--until 'regex'` (`--scrollback N` extends history) |
 | …and it must be *new* output, not text left on screen | `--until 'regex' --since-send` |
-| No marker exists (animated TUI) | `--quiet-ms 800`, at 2-3x the observed frame period |
+| No marker exists (animated TUI) | `--quiet-ms 800`, at 2-3x the observed frame period — **but it proves the display stopped changing, not that the program finished**: a met quiet verdict while something holds the pane carries `program_running: true` and a `note` |
 | Several things must hold | pass multiple conditions in one `wait` (AND; verdict takes the weakest confidence) |
+
+`--done` and `--cmd-done` are scoped to your **last send**: a completion marker left
+behind by an earlier command cannot satisfy them, which is why neither needs
+`--since-send`. That flag belongs to `--until`, the one channel that really can be
+fooled by text already on the screen.
 
 `--done` exists because `--until` is the flag people reach for and the weakest
 of the ones that fit: a screen regex proves *some text is on screen*, which your
@@ -142,7 +147,14 @@ managed bash pane (`bun cli.js done 2`, `pytest -q`, `make`) has its own short a
 - Anchor `--until` on the program's own bytes, never on the prompt (the prompt repaints
   after every command, so it is already matched before you send anything).
 - If the program writes an artifact, `send --type 'cat state.json'` and read it from the
-  recording — the file is the truth, the screen is a rendering of it.
+  recording — the file is the truth, the screen is a rendering of it. Reading
+  program-produced state is legitimate evidence; the red line is editing it.
+- **Existence is not content, and re-running is a write.** `sqlite3.connect("x.db")`
+  creates an empty database the moment a verification command opens it, so "the file
+  exists" proves only that you looked — assert what only the program could have written
+  (a version pragma, a row set, a byte count). And before repeating a silent command,
+  ask whether it is idempotent: the second run of a non-idempotent step corrupts the state
+  while both exit codes still read `0`.
 
 TUI menus **debounce arrow keys**: `send --key Up --key Up` in one call moves
 the selection **once**. Let the tool do the rhythm — each repetition is a full

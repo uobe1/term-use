@@ -32,6 +32,15 @@
 # arm's writable tree: BenchJack audited 4,458 tasks and found every public
 # benchmark hackable, most often by reaching the checker.
 #
+# Known confound, stated rather than hidden: an arm runs inside this repo's
+# session, so the project's AGENTS.md is auto-injected into its opening context
+# and the harness skill list is visible to it. Both arms of rounds 1-2 disclosed
+# this. It equalizes the *skill* comparison (each arm reads only its own /tmp
+# copy) but not the documentation one — an arm can see maintainer notes it was
+# not supposed to. Treat `doc=` as an upper bound on the skill's own contribution;
+# for a clean room, copy src/ plus the skill into a scratch project with no
+# instruction files at its root.
+#
 # Two axes on purpose. OBJECTIVE (verdict, re-send count, tokens, context bytes,
 # wall clock) says what happened; SUBJECTIVE (`confusion`, below) says what it
 # felt like from inside the agent, which is the only way to see a tool that was
