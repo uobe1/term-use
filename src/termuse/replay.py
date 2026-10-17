@@ -152,8 +152,10 @@ def resolve_at(session: str, at: str) -> tuple[dict, float | None, int | None]:
 
 
 def frame(session: str, *, elapsed: float | None = None, offset: int | None = None,
-          cols: int = 80, rows: int = 24, settle_s: float = 5.0) -> str:
-    """The pane's own `capture-pane -e` output after replaying up to a point."""
+          cols: int = 80, rows: int = 24, settle_s: float = 5.0) -> tuple[str, dict]:
+    """The pane's own `capture-pane -e` output after replaying up to a point,
+    plus what the reconstructed pane reports about itself (cursor, alternate
+    screen, and the geometry the replay actually ended on)."""
     segs = _segments(session, offset, elapsed)
     total = sum(len(s[0]) for s in segs)
     sock = f"tu-replay-{os.getpid()}"
@@ -220,7 +222,25 @@ def frame(session: str, *, elapsed: float | None = None, offset: int | None = No
         cap = tmuxio.tmux("capture-pane", "-p", "-e", "-N", "-t", "rp",
                           socket=sock)
         text = tmuxio.require(cap, "session-missing")
+        # A frame is a screen *and* a cursor: tmux knows where the reconstructed
+        # pane left its cursor and whether the program was on the alternate
+        # screen, which is what lets a replayed picture show where the program
+        # actually was — and lets the caller take the geometry from the replay
+        # instead of trusting the header it started with.
+        cur = tmuxio.tmux("display-message", "-p", "-t", "rp", "-F",
+                          "#{cursor_x}|#{cursor_y}|#{alternate_on}"
+                          "|#{pane_width}|#{pane_height}", socket=sock)
     finally:
         tmuxio.tmux("kill-server", socket=sock)
-    return text
+    parts = tmuxio.require(cur, "session-missing").rstrip("\n").split("|")
+
+    def num(i: int) -> int | None:
+        try:
+            return int(parts[i])
+        except (IndexError, ValueError):
+            return None
+
+    return text, {"cursor_x": num(0), "cursor_y": num(1),
+                  "alternate_on": parts[2] == "1" if len(parts) > 2 else None,
+                  "pane_width": num(3), "pane_height": num(4)}
 

@@ -165,9 +165,15 @@ class AllOf(Condition):
 class CmdDone(Condition):
     """OSC 133 D marker after a C, scanned from raw.log since the last send.
 
-    fact confidence: the exit code comes from the shell protocol, not from
+    fact confidence: the exit code comes from the terminal protocol, not from
     screen text. Expect-code mismatch fails immediately (never waits out the
     timeout). Requires shell integration recorded in state.json.
+
+    On tmux 3.8+ there is a second fact source for the same event: tmux parses
+    the markers itself and answers `pane_command_status`/`_running`, which
+    `--cmd-done` consults first because one display-message beats replaying the
+    recording. It also answers where the scan cannot: markers forwarded through
+    ssh, or emitted by a shell whose startup files took PROMPT_COMMAND back.
     """
     label = "cmd-done"
     confidence = "fact"
@@ -176,10 +182,49 @@ class CmdDone(Condition):
         self.session = session
         self.expect_code = expect_code
         self.exit_code: int | None = None
+        self.via: str | None = None       # which channel answered
+        self._saw_running = False
 
     def _stream(self) -> str:
         state = records.read_state(self.session)
         return records.stream_since(self.session, state.get("last_send_offset", 0))
+
+    def _mismatch(self, code: int, ctx) -> None:
+        raise osc133.mismatch_error(
+            self.expect_code, code,
+            {"exit_code": code, "expected": self.expect_code,
+             "screen": ctx.capture(0)})
+
+    def _native(self, ctx, state: dict) -> int | None:
+        """tmux's own completion answer, or None when it has none to give.
+
+        The baseline is stamped at send time, before the bytes go in, so
+        "a command completed" means "completed after this send". Two readings
+        of the same second are unavoidable at tmux's one-second granularity
+        (end_time unchanged), which is why a sighting of running=1 or a changed
+        exit code also counts — and why a None here falls through to the
+        byte-precise scan rather than failing the wait.
+        """
+        if "native_baseline" not in state:
+            return None
+        try:
+            m = ctx.meta()
+        except TDError:
+            return None
+        if "pane_command_running" not in m:
+            return None                     # tmux 3.2a–3.7c: no native channel
+        if m.get("pane_command_running"):
+            self._saw_running = True        # fact: still in flight
+            return None
+        code = m.get("pane_command_status")
+        if code is None:
+            return None                     # no marker has ever reached tmux
+        base = state.get("native_baseline") or {}
+        if (m.get("pane_command_end_time") or 0) > (base.get("end_time") or 0):
+            return code
+        if base.get("status") is None or self._saw_running or code != base.get("status"):
+            return code
+        return None
 
     def evaluate(self, ctx) -> bool:
         """Replay the full o-stream through the state machine, then accept
@@ -188,6 +233,13 @@ class CmdDone(Condition):
         continuity: the C of a long-running command may sit far behind the
         scan start."""
         state = records.read_state(self.session)
+        ncode = self._native(ctx, state)
+        if ncode is not None:
+            self.exit_code = ncode
+            self.via = "tmux-command-status"
+            if self.expect_code is not None and ncode != self.expect_code:
+                self._mismatch(ncode, ctx)
+            return True
         offset = state.get("last_send_offset", 0)
         sc = osc133.OSC133Scanner()
         last_done = None    # (code, byte_pos) — a D preceded by a C
@@ -208,11 +260,9 @@ class CmdDone(Condition):
         code_ = last_done[0]
         del last_abort  # informative only; completion is already proven
         self.exit_code = code_
+        self.via = "osc133"
         if self.expect_code is not None and self.exit_code != self.expect_code:
-            raise osc133.mismatch_error(
-                self.expect_code, self.exit_code,
-                {"exit_code": self.exit_code, "expected": self.expect_code,
-                 "screen": ctx.capture(0)})
+            self._mismatch(self.exit_code, ctx)
         return True
 
     def to_json(self, met: bool) -> dict:
@@ -241,6 +291,10 @@ class ShellReady(Condition):
     def __init__(self, session: str):
         self.session = session
         self._done = CmdDone(session, 0)
+
+    @property
+    def via(self) -> str | None:
+        return self._done.via
 
     def evaluate(self, ctx) -> bool:
         return self._done.evaluate(ctx)
@@ -543,13 +597,29 @@ TERMINAL_PASSTHROUGH = ("ssh", "slogin", "mosh", "telnet", "tmux", "screen",
                         "dtach", "abduco")
 
 
+def native_state(meta: dict | None) -> dict | None:
+    """tmux's own command-status reading, or None when this server has none.
+
+    Absent keys mean 3.2a–3.7c (`tmuxio.meta` drops the group there rather than
+    reporting empties), so this is also the version gate.
+    """
+    m = meta or {}
+    if "pane_command_running" not in m:
+        return None
+    return {"running": bool(m.get("pane_command_running")),
+            "status": m.get("pane_command_status"),
+            "end_time": m.get("pane_command_end_time"),
+            "generation": m.get("pane_output_generation")}
+
+
 def _managed_shell(state: dict | None) -> str:
     words = str((state or {}).get("cmd") or "").split()
     return words[0].rsplit("/", 1)[-1] if words else ""
 
 
 def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
-                       since_offset: int, ctx=None) -> TDError | None:
+                       since_offset: int, ctx=None,
+                       after_timeout: bool = False) -> TDError | None:
     """Name the reason a shell-protocol wait can never be satisfied, if there is one.
 
     Three states look alike from the outside and need different answers: the
@@ -558,9 +628,19 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
     as the first and the hint pushes agents into the third.
     """
     fg = str((meta or {}).get("pane_current_command") or "")
+    nat = native_state(meta)
+    # tmux having *a* status says only that some marker reached this pane
+    # sometime. If it answers the current command, CmdDone already met; so this
+    # is worth suppressing a claim before the wait, and worthless after it.
+    nat_has_evidence = bool(nat and nat["status"] is not None and not after_timeout)
 
     def ev(extra: dict | None = None) -> dict:
         out = {"pane_current_command": fg or None}
+        if nat is not None:
+            # tmux's own reading belongs in the evidence: `running` true with a
+            # quiet pane is a different story from `running` false, and an agent
+            # that can see it does not have to guess which one it hit.
+            out["native"] = nat
         if ctx is not None:
             try:
                 out["screen"] = ctx.capture(0)
@@ -571,19 +651,42 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
         return out
 
     if fg in TERMINAL_PASSTHROUGH:
+        # A remote shell that keeps its own integration does reach tmux's native
+        # status through ssh, so before refusing anything we only suppress the
+        # claim when tmux has seen markers in this pane and the wait has not been
+        # tried yet. Once the timeout is spent with no native answer, a stale
+        # status is no excuse — that is exactly the ssh-without-integration shape
+        # the tester could not tell apart from a hung session.
+        if nat_has_evidence:
+            return None
+        base = ("markers from a remote/nested shell arrive as ordinary bytes to "
+                "term-use's own recording, so --cmd-done/--shell-ready cannot be "
+                "satisfied here. Wait on program output instead: --until 'regex' "
+                "--since-send (only new output), read it with `out`, or print "
+                "your own sentinel (printf 'DONE%s\\n' '$?'). Do NOT send a quit "
+                "key: the shell behind ssh may be idle and healthy.")
+        if nat is None:
+            # tmux ≤3.7c: there is a second channel to be had, on a newer server.
+            base += (" On tmux 3.8+ term-use also asks tmux itself, and tmux parses "
+                     "the markers forwarded from the far side of ssh — so an "
+                     "integrated remote shell regains fact-level --done there.")
+        elif nat["status"] is None:
+            base += (" tmux's own reading agrees (this pane has never emitted a "
+                     "command marker), so nothing on either side of this ssh "
+                     "answers the protocol: change channel.")
+        else:
+            base += (" tmux was asked too and answered no completion for this send "
+                     "(evidence.native), so even a marker-emitting remote did not "
+                     "finish — check the screen before concluding anything else.")
         return TDError(
             "shell-protocol-unavailable",
             f"the pane's foreground program is {fg!r}: OSC 133 answers come from "
             f"the local shell, which is blocked inside it",
-            hint="markers from a remote/nested shell arrive as ordinary bytes, so "
-                 "--cmd-done/--shell-ready can never be satisfied here. Wait on "
-                 "program output instead: --until 'regex' --since-send (only new "
-                 "output), read it with `out`, or print your own sentinel "
-                 "(printf 'DONE%s\\n' '$?'). Do NOT send a quit key: the shell "
-                 "behind ssh may be idle and healthy.",
+            hint=base,
             evidence=ev())
     if state is not None and state.get("shell_integration"):
-        if not records.markers_seen(session, 0, kinds=("C", "D")):
+        if (not records.markers_seen(session, 0, kinds=("C", "D"))
+                and not nat_has_evidence):
             return TDError(
                 "shell-protocol-unavailable",
                 f"session {session!r} was given shell integration but has emitted "
@@ -597,15 +700,33 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
         if (fg in ("", _managed_shell(state))
                 and not records.markers_seen(session, since_offset)
                 and (records.output_age_s(session) or 0) > 1.0):
+            # PS0 emits C and PROMPT_COMMAND emits D, so a framework that took
+            # PROMPT_COMMAND back leaves exactly the same mark as a shell blocked
+            # on `read`: a C with no D and a quiet pane. Markers alone cannot
+            # separate those, and pretending otherwise is how agents end up
+            # interrupting an idle shell — so name both readings and the one
+            # signal that tells them apart (the screen in the evidence).
+            hint = ("a prompt framework likely took PROMPT_COMMAND back after our "
+                    "injection. The pane has also produced no output for over a "
+                    "second, so 'still running' is the less likely reading: "
+                    "switch to --until 'regex' --since-send, or read `out`. "
+                    "Do not send a quit key on the strength of this alone.")
+            if nat and nat["running"]:
+                hint = ("tmux reports a command that started and never finished "
+                        "while the pane has gone quiet, and two shapes produce "
+                        "exactly that: the shell is waiting for input (read, a "
+                        "password prompt, a menu), or its completion hook died "
+                        "(a prompt framework rewrites PROMPT_COMMAND every prompt "
+                        "while PS0 keeps emitting C). evidence.screen tells them "
+                        "apart — an idle prompt on screen means the second, so "
+                        "switch to --until 'regex' --since-send or read `out`; a "
+                        "program asking for something means send that input. Do "
+                        "not send a quit key without looking.")
             return TDError(
                 "shell-protocol-unavailable",
                 f"the marker channel went silent: this session emitted OSC 133 "
                 f"before, nothing since the last send",
-                hint="a prompt framework likely took PROMPT_COMMAND back after our "
-                     "injection. The pane has also produced no output for over a "
-                     "second, so 'still running' is the less likely reading: "
-                     "switch to --until 'regex' --since-send, or read `out`. "
-                     "Do not send a quit key on the strength of this alone.",
+                hint=hint,
                 evidence=ev({"last_output_age_s": records.output_age_s(session)}))
     return None
 
@@ -633,8 +754,10 @@ def timeout_evidence(ctx, condition: Condition) -> dict:
     try:
         m = ctx.meta()
         cursor = {"x": m.get("cursor_x"), "y": m.get("cursor_y")}
+        nat = native_state(m)
     except Exception:
         cursor = None
+        nat = None
     raw_tail = ""
     if condition.__class__.__name__ == "AllOf":
         session = next((getattr(c, "session", None) for c in condition.conditions
@@ -645,6 +768,7 @@ def timeout_evidence(ctx, condition: Condition) -> dict:
             except (TDError, OSError):
                 pass
     return {"screen": screen, "cursor": cursor, "raw_tail": raw_tail,
+            **({"native": nat} if nat else {}),
             "conditions": [condition.to_json(False)]}
 
 

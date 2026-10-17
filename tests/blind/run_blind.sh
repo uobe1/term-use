@@ -5,9 +5,10 @@
 #   bash tests/blind/run_blind.sh          # print the protocol + prompt template
 #   TERM_USE_DISABLE_IMAGE=1 bash ...    # heuristics-only mode for testers
 #
-# The env switch TERM_USE_DISABLE_IMAGE=1 makes `screenshot` return a
-# structured pillow-missing-style error, so a subagent tester cannot use the
-# image channel and must rely on the text channels (heuristic tier).
+# The env switch TERM_USE_DISABLE_IMAGE=1 makes `screenshot` (and
+# `replay --format png`) return a pillow-missing-style error, so a subagent
+# tester cannot use the image channel and must rely on the text channels
+# (heuristic tier).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

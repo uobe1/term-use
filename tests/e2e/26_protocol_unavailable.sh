@@ -131,7 +131,9 @@ $TD send -n td26p --type "echo PC_MARK; false" --key Enter >/dev/null
 $TD wait -n td26p --done --expect-code 1 --timeout 15 | python3 -c '
 import json, sys
 v = json.load(sys.stdin)
-assert v["confidence"] == "fact" and v["via"] == "osc133", v
+# either fact channel is a correct proof; on tmux 3.8 the native status usually
+# answers first, and both must report the same exit code
+assert v["confidence"] == "fact" and v["via"] in ("osc133", "tmux-command-status"), v
 assert v["exit_code"] == 1, f"the user PROMPT_COMMAND swallowed the exit code: {v}"
 ' || fail "fact channel must survive a user PROMPT_COMMAND (see above)"
 $TD stop -n td26p >/dev/null

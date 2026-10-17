@@ -207,6 +207,28 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def stamp_native_baseline(target, state: dict) -> None:
+    """Record what tmux's own command status said *before* these bytes went in.
+
+    `wait --cmd-done` compares against this to prove that the completion it saw
+    belongs to this send. Stamped before injection (not after) because a fast
+    command is finished by the time send-keys returns, and a baseline read late
+    would already contain its answer. No-op on tmux 3.2a–3.7c, which has no
+    such channel; the caller persists the state.
+    """
+    try:
+        m = tmuxio.meta(target)
+    except TDError:
+        return
+    if "pane_command_running" not in m:
+        state.pop("native_baseline", None)  # no native channel: claim nothing
+        return
+    state["native_baseline"] = {
+        "status": m.get("pane_command_status"),
+        "end_time": m.get("pane_command_end_time"),
+        "running": m.get("pane_command_running")}
+
+
 def cmd_send(args) -> int:
     # Argument validation comes before any target resolution: an invalid
     # --repeat/--delay must fail as invalid-arguments regardless of whether
@@ -224,6 +246,8 @@ def cmd_send(args) -> int:
     # accumulate bogus record dirs.
     writer = records.V2Writer(target.session) if state else None
     offset = writer.size() if writer else 0  # where output caused by this send starts
+    if state is not None:
+        stamp_native_baseline(target, state)
     sent_text = "".join(args.type or [])
     warning = None
     events: list[dict] = []
@@ -255,6 +279,7 @@ def cmd_fix_tty(args) -> int:
     state = records.read_state(target.session)
     writer = records.V2Writer(target.session)
     offset = writer.size()
+    stamp_native_baseline(target, state)
     # C-u clears whatever half-typed line is sitting in the shell buffer,
     # so "stty sane" can never glue onto leftover input. Order matters:
     # clear first, then type the command, then Enter.
@@ -341,12 +366,20 @@ def cmd_screen(args) -> int:
     return 0
 
 
-def require_shell_integration(target: tmuxio.Target, state: dict | None) -> dict:
+def require_shell_integration(target: tmuxio.Target, state: dict | None,
+                             wait_s: float = 1.5) -> dict:
     """Shared gate for --cmd-done and --shell-ready.
 
     Distinguishes an unmanaged pane (exists in tmux, no state.json — e.g.
     nested tmux, a supported scenario) from a target that doesn't exist at
     all: the former gets `unmanaged-pane`, never a push to `start`.
+
+    `wait_s` is how long the *stream* gets to prove it carries markers before
+    the gate refuses: a shell that emits them on its own (fish, a user's own
+    integration) is not behind on purpose, it may just be slow to paint its
+    first prompt — under a loaded regression suite a fixed 1.5s sample failed
+    one run in three. The caller's own timeout is the right budget, and the
+    refusal still happens for a shell that truly never emits them.
     """
     if state is None:
         exists = tmuxio.tmux("has-session", "-t", target.session,
@@ -373,7 +406,7 @@ def require_shell_integration(target: tmuxio.Target, state: dict | None) -> dict
         # the markers on its own (fish >= 4.0) or carries another tool's
         # integration (VSCode's OSC 633, WezTerm's 133) is equally good
         # evidence — believe the stream, not the launch-time guess.
-        if records.detect_shell_integration(target.session, wait_s=1.5):
+        if records.detect_shell_integration(target.session, wait_s=wait_s):
             state["shell_integration"] = True
             writer = records.V2Writer(target.session)
             writer.state = state
@@ -438,8 +471,9 @@ def cmd_wait(args) -> int:
     def inject_probe() -> None:
         """The `true` probe (the skill's standard loop, internalized): text
         and Enter are separate send-keys calls (the split-send red line)."""
-        require_shell_integration(target, state)
+        require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
         probe_offset = writer.size()
+        stamp_native_baseline(target, state)
         probe = tdinput.send(target, ["true"], ["Enter"], [])
         writer.append("i", probe)
         state["last_send_offset"] = probe_offset
@@ -494,7 +528,7 @@ def cmd_wait(args) -> int:
                 managed=(oracle == "quiet")))
             advice = waiting.oracle_advice(state, oracle)
     if args.cmd_done:
-        require_shell_integration(target, state)
+        require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
         conditions.append(waiting.CmdDone(target.session, args.expect_code))
     if args.shell_ready:
         inject_probe()
@@ -542,7 +576,18 @@ def cmd_wait(args) -> int:
                 "evidence": {"screen": screen},
                 "context": verdict_ctx,
             }
-            if via:
+            answered = next((getattr(c, "via", None) for c in conditions
+                             if getattr(c, "via", None)), None)
+            if answered:
+                # Name the channel that actually answered: on tmux 3.8 the
+                # native command status often beats our own byte scan to a
+                # fast command's done marker, and claiming "osc133" while
+                # reporting a code tmux handed us is the sort of detail that
+                # makes people distrust confidence labels. An oracle that is
+                # built *on top of* cmd-done (the probe) keeps its own name.
+                verdict["channel"] = answered
+                verdict["via"] = via if (via and via != "osc133") else answered
+            elif via:
                 verdict["via"] = via
             if advice:
                 verdict["advice"] = advice
@@ -563,7 +608,8 @@ def cmd_wait(args) -> int:
             break
         time.sleep(args.interval)
     dead = waiting.protocol_diagnosis(target.session, state, pane_meta(),
-                                      (state or {}).get("last_send_offset", 0), ctx)
+                                      (state or {}).get("last_send_offset", 0),
+                                      ctx, after_timeout=True)
     if dead is not None and (args.cmd_done or args.shell_ready or args.done):
         raise dead
     if args.shell_ready and waiting.shell_ready_unmet(ctx, cond):
@@ -650,6 +696,12 @@ def cmd_out(args) -> int:
 
 def cmd_replay(args) -> int:
     """The screen at an earlier moment, rebuilt through tmux itself."""
+    if args.format == "png" and os.environ.get("TERM_USE_DISABLE_IMAGE") == "1":
+        # Same denial as `screenshot`: the heuristics-only blind-test mode must
+        # not have a second door into the image channel.
+        raise TDError("pillow-missing",
+                      "image channel disabled by TERM_USE_DISABLE_IMAGE=1",
+                      hint="this session runs heuristics-only; use the text channels")
     target = resolve_target(args.name, getattr(args, "socket", None))
     head = records.header(target.session)
     if head is None:
@@ -661,8 +713,16 @@ def cmd_replay(args) -> int:
     _h, elapsed, offset = replay.resolve_at(target.session, args.at)
     cols = int(head.get("width") or 80)
     rows = int(head.get("height") or 24)
-    text = replay.frame(target.session, elapsed=elapsed, offset=offset,
-                        cols=cols, rows=rows, settle_s=args.timeout)
+    text, frame = replay.frame(target.session, elapsed=elapsed, offset=offset,
+                               cols=cols, rows=rows, settle_s=args.timeout)
+    # The replayed pane is the authority on its own geometry: a recorded resize
+    # may have moved it away from the header the session started with.
+    cols = frame.get("pane_width") or cols
+    rows = frame.get("pane_height") or rows
+    cursor = None
+    if args.cursor and isinstance(frame.get("cursor_x"), int) \
+            and isinstance(frame.get("cursor_y"), int):
+        cursor = (frame["cursor_x"], frame["cursor_y"])
     grid = tdscreen.parse_grid(text)
     stats = tdscreen.grid_stats(grid)
     plain = tdscreen.visible_text(text)
@@ -670,7 +730,8 @@ def cmd_replay(args) -> int:
         out_path = args.o or default_shot_path(target.session, "png",
                                                load_state_or_none(target.session) is not None)
         try:
-            info = tdscreenshot.render(grid, out_path, "png", cols=cols, rows=rows)
+            info = tdscreenshot.render(grid, out_path, "png", cols=cols,
+                                       rows=rows, cursor=cursor)
         except ImportError:
             raise TDError("pillow-missing",
                           "Pillow is required for the image channel",
@@ -681,7 +742,9 @@ def cmd_replay(args) -> int:
                   "font (or fix the dir) for the machine's own look", file=sys.stderr)
         ctx = tdbudget.image_context(info["path"], info["size"])
         print(json.dumps({"ok": True, "at": args.at, "format": "png", **info,
-                          "replayed": True, "context": ctx}, ensure_ascii=False))
+                          "replayed": True,
+                          "cursor": list(cursor) if cursor else None,
+                          "context": ctx}, ensure_ascii=False))
         tdbudget.warn(ctx, target.session)
         return 0
     if args.format == "json":
@@ -689,6 +752,8 @@ def cmd_replay(args) -> int:
         print(json.dumps({"ok": True, "at": args.at, "grid": [cols, rows],
                           "engine": "pane-replay", "blank": stats["blank"],
                           "cells": stats["painted_cells"], "text": plain,
+                          "cursor": list(cursor) if cursor else None,
+                          "alternate_on": frame.get("alternate_on"),
                           "context": ctx}, ensure_ascii=False))
         tdbudget.warn(ctx, target.session)
         return 0
@@ -1039,7 +1104,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=10.0,
                    help="how long to wait for the scratch pane to consume the "
                         "recording (default 10)")
-    p.set_defaults(func=cmd_replay)
+    p.add_argument("--no-cursor", dest="cursor", action="store_false",
+                   help="omit the cursor outline from --format png (default: "
+                        "draw where the replayed pane left its cursor)")
+    p.set_defaults(cursor=True, func=cmd_replay)
     return parser
 
 

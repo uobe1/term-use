@@ -38,7 +38,9 @@ $TD wait -n td20 --done --expect-code 0 --timeout 20 | python3 -c '
 import json, sys
 v = json.load(sys.stdin)
 assert v["confidence"] == "fact", v
-assert v["via"] == "osc133", v
+# either fact channel is a correct answer; which one answered is the point of
+# `via`, and on tmux 3.8 the native status often wins the race for a fast command
+assert v["via"] in ("osc133", "tmux-command-status"), v
 assert v["exit_code"] == 0, v
 assert "DONE20_A" in v["evidence"]["screen"], "verdict should still show the screen"
 ' || fail "--done after a command (see above)"

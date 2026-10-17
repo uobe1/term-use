@@ -146,11 +146,31 @@ def signal_name(value: str) -> str:
     return value
 
 
+# tmux 3.8's command-status group. Every one of these expands to the empty
+# string on 3.2a–3.7c (unknown formats are not an error there), so presence is
+# read off `pane_command_running`, the only member that is 0 rather than empty
+# whenever the group exists.
+NATIVE_KEYS = ("pane_command_status", "pane_command_running",
+               "pane_command_start_time", "pane_command_end_time",
+               "pane_command_duration", "pane_last_prompt_time",
+               "pane_output_generation")
+
+
 def meta(target: Target) -> dict:
-    """One-call pane status: cursor, modes, history, death, size, cwd."""
+    """One-call pane status: cursor, modes, history, death, size, cwd.
+
+    tmux 3.8+ answers the `pane_command_*` group itself: it parses OSC 133 out
+    of the pane's output and keeps the exit code, so those fields are a fact
+    channel that survives both a prompt framework rewriting PROMPT_COMMAND and
+    markers forwarded through ssh. On 3.2a–3.7c the formats do not exist and
+    expand to empty, so an empty `pane_command_running` means "this server has
+    no native channel" and the keys are dropped rather than reported as None —
+    absence is the version answer, and a None would read as "no command yet".
+    """
     keys = ("cursor_x", "cursor_y", "alternate_on", "pane_in_mode",
             "history_size", "pane_dead", "pane_dead_status", "pane_dead_signal",
             "pane_width", "pane_height", "pane_current_command",
+            *NATIVE_KEYS,
             "pane_current_path")
     fmt = "|".join("#{" + k + "}" for k in keys)
     res = tmux("display-message", "-p", "-F", fmt, "-t", target.to_arg(), socket=target.socket)
@@ -158,7 +178,7 @@ def meta(target: Target) -> dict:
     d: dict = {}
     bool_keys = {"alternate_on", "pane_in_mode", "pane_dead"}
     int_keys = {"cursor_x", "cursor_y", "history_size", "pane_dead_status",
-                "pane_width", "pane_height"}
+                "pane_width", "pane_height", *NATIVE_KEYS}
     for i, k in enumerate(keys):
         # pane_current_path is last and may itself contain "|": rejoin tail.
         if k == "pane_current_path" and len(out) > len(keys) - 1:
@@ -178,4 +198,7 @@ def meta(target: Target) -> dict:
             d[k] = v
     if d.get("pane_dead_signal"):
         d["pane_dead_signal_name"] = signal_name(d["pane_dead_signal"])
+    if d.get("pane_command_running") is None:
+        for k in NATIVE_KEYS:
+            d.pop(k, None)  # no native channel here: say nothing, not "empty"
     return d

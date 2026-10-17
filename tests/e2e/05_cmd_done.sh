@@ -53,7 +53,12 @@ if $TD wait -n "$NAME" --cmd-done --expect-code 5 --timeout 30 2>"$TMP/err.json"
 fi
 T1="$(date +%s%N)"
 ELAPSED_MS=$(( (T1 - T0) / 1000000 ))
-[ "$ELAPSED_MS" -lt 2000 ] || fail "expect-code mismatch took ${ELAPSED_MS}ms (should fail immediately)"
+# The property is "a mismatch does not burn the timeout", so bound it by the
+# timeout — not by a fixed wall clock. A fixed 2000ms measured this box's
+# process startup instead: `python3 -m termuse --help` alone has been timed
+# here between 0.5s and 3.8s, and a fast answer can never look slow on a slow
+# machine. 1/4 of --timeout still catches the real regression (waiting it out).
+[ "$ELAPSED_MS" -lt 7500 ] || fail "expect-code mismatch took ${ELAPSED_MS}ms of a 30000ms timeout (should fail immediately)"
 python3 -c "
 import json,sys
 e=json.load(open('$TMP/err.json'))['error']

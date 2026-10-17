@@ -127,6 +127,11 @@ $TD replay -n td23t --at last-send --format json | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 assert r["ok"] and r["at"] and r["grid"], r
+# A frame is a screen *and* a position: the replayed pane must report where it
+# left the cursor, inside the geometry the replay actually ended on.
+c, (w, h) = r["cursor"], r["grid"]
+assert isinstance(c, list) and len(c) == 2, f"no cursor in the replayed frame: {r}"
+assert 0 <= c[0] < w and 0 <= c[1] < h, f"cursor {c} outside grid {w}x{h}"
 ' || fail "replay --at last-send --format json"
 
 # --- replay must not leave a mess or fake a managed session -----------------
@@ -138,6 +143,12 @@ python3 -c "
 import json, os
 assert os.path.getsize('$TMP/f.png') > 100
 " || fail "replayed frame png"
+# `--no-cursor` is the same switch `screenshot` has, with the same effect
+$TD replay -n td23t --at 2.0 --format json --no-cursor | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["cursor"] is None, "--no-cursor must omit it: " + repr(r["cursor"])
+' || fail "replay --no-cursor"
 
 $TD stop -n td23 >/dev/null; $TD stop -n td23t >/dev/null
 echo "E2E-23 PASS"
