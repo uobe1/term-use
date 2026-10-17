@@ -41,10 +41,17 @@ def bashrc_template() -> str:
         "# --- term-use v2 shell integration (OSC 133) ---",
         *_SOURCE_BLOCK,
         "__td_ps() { printf '\\033]133;D;%s\\007\\033]133;A\\007' \"$1\"; }",
+        # Splicing the user's PROMPT_COMMAND into ours as *text* re-expands it
+        # at every prompt (and emitted a corrupt second marker that masked the
+        # real one). Save it and eval it from a function that carries $? across.
+        '__tu_pc=""',
+        '__tu_run_pc() { local __tu_s=$?; [ -n "$__tu_pc" ] && eval "$__tu_pc"; '
+        'return "$__tu_s"; }',
         'case ":$PROMPT_COMMAND:" in',
         '  *"__td_ps"*) ;;  # already integrated',
         '  "::") PROMPT_COMMAND="__td_ps \\$?" ;;',
-        '  *) PROMPT_COMMAND="__td_ps \\$?;${PROMPT_COMMAND:+\\$PROMPT_COMMAND}" ;;',
+        '  *) __tu_pc="$PROMPT_COMMAND" '
+        'PROMPT_COMMAND="__td_ps \\$?; __tu_run_pc" ;;',
         "esac",
         'PS0="${PS0}\\e]133;C\\a"',
         'PS1="\\[\\e]133;B\\a\\]$PS1"',

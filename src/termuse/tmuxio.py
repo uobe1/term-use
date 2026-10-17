@@ -150,7 +150,8 @@ def meta(target: Target) -> dict:
     """One-call pane status: cursor, modes, history, death, size, cwd."""
     keys = ("cursor_x", "cursor_y", "alternate_on", "pane_in_mode",
             "history_size", "pane_dead", "pane_dead_status", "pane_dead_signal",
-            "pane_width", "pane_height", "pane_current_path")
+            "pane_width", "pane_height", "pane_current_command",
+            "pane_current_path")
     fmt = "|".join("#{" + k + "}" for k in keys)
     res = tmux("display-message", "-p", "-F", fmt, "-t", target.to_arg(), socket=target.socket)
     out = require(res).rstrip("\n").split("|")

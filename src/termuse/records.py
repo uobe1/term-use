@@ -160,6 +160,20 @@ def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
         time.sleep(0.1)
 
 
+def markers_seen(session: str, since_offset: int = 0, kinds=("D",)) -> bool:
+    """Did the pane emit any of these OSC 133/633 markers in the stream range?
+
+    A launch-time claim of shell integration is not a promise: a prompt
+    framework that rewrites PROMPT_COMMAND (starship, powerline) takes the
+    channel away mid-session. `kinds` defaults to `D` alone because `D` is the
+    completion answer — `C` (from PS0) can keep flowing while `D` is dead, and
+    counting both would miss exactly that case.
+    """
+    text = stream_since(session, since_offset)
+    return any(f"\x1b]{code};{m}" in text
+               for code in ("133", "633") for m in kinds)
+
+
 def pending_input(session: str, since_offset: int) -> str | None:
     """Text injected after the last Enter — the "half-typed line" signal.
 

@@ -190,18 +190,23 @@ class CmdDone(Condition):
         state = records.read_state(self.session)
         offset = state.get("last_send_offset", 0)
         sc = osc133.OSC133Scanner()
-        last_terminal = None  # (kind, code, byte_pos)
+        last_done = None    # (code, byte_pos) — a D preceded by a C
+        last_abort = None   # byte_pos of a stray D with no C
         for _ts, code, data, pos in records.events_since(self.session, 0):
             if code != "o" or not isinstance(data, str):
                 continue
             for ev in sc.feed(data):
-                if ev["kind"] in ("done", "aborted"):
-                    last_terminal = (ev["kind"], ev.get("code"), pos)
-        if last_terminal is None or last_terminal[2] < offset:
+                if ev["kind"] == "done":
+                    last_done = (ev.get("code"), pos)
+                elif ev["kind"] == "aborted":
+                    last_abort = pos
+        # A done is never masked by a later stray marker: shells emit more than
+        # one D per prompt (an integration hook plus the user's own), and the
+        # trailing one carries no command.
+        if last_done is None or last_done[1] < offset:
             return False
-        kind, code_, _ = last_terminal
-        if kind == "aborted":
-            return False  # marker without a fresh C: no command completed
+        code_ = last_done[0]
+        del last_abort  # informative only; completion is already proven
         self.exit_code = code_
         if self.expect_code is not None and self.exit_code != self.expect_code:
             raise osc133.mismatch_error(
@@ -528,6 +533,81 @@ class QuietCondition(Condition):
 
     def to_json(self, met: bool) -> dict:
         return {**super().to_json(met), "ms": self.ms}
+
+
+# Programs that host *another* terminal. Their shell's markers arrive as inert
+# bytes for us, so the fact channel is structurally dead even while the local
+# shell is perfectly healthy — the case that must never be reported as
+# "inside an interactive program, send its quit key".
+TERMINAL_PASSTHROUGH = ("ssh", "slogin", "mosh", "telnet", "tmux", "screen",
+                        "dtach", "abduco")
+
+
+def _managed_shell(state: dict | None) -> str:
+    words = str((state or {}).get("cmd") or "").split()
+    return words[0].rsplit("/", 1)[-1] if words else ""
+
+
+def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
+                       since_offset: int, ctx=None) -> TDError | None:
+    """Name the reason a shell-protocol wait can never be satisfied, if there is one.
+
+    Three states look alike from the outside and need different answers: the
+    command is still running (wait), the marker channel is dead (change channel),
+    the session is wedged (reconnect). Without this, the second one is reported
+    as the first and the hint pushes agents into the third.
+    """
+    fg = str((meta or {}).get("pane_current_command") or "")
+
+    def ev(extra: dict | None = None) -> dict:
+        out = {"pane_current_command": fg or None}
+        if ctx is not None:
+            try:
+                out["screen"] = ctx.capture(0)
+            except (TDError, OSError):
+                out["screen"] = None
+        if extra:
+            out.update(extra)
+        return out
+
+    if fg in TERMINAL_PASSTHROUGH:
+        return TDError(
+            "shell-protocol-unavailable",
+            f"the pane's foreground program is {fg!r}: OSC 133 answers come from "
+            f"the local shell, which is blocked inside it",
+            hint="markers from a remote/nested shell arrive as ordinary bytes, so "
+                 "--cmd-done/--shell-ready can never be satisfied here. Wait on "
+                 "program output instead: --until 'regex' --since-send (only new "
+                 "output), read it with `out`, or print your own sentinel "
+                 "(printf 'DONE%s\\n' '$?'). Do NOT send a quit key: the shell "
+                 "behind ssh may be idle and healthy.",
+            evidence=ev())
+    if state is not None and state.get("shell_integration"):
+        if not records.markers_seen(session, 0, kinds=("C", "D")):
+            return TDError(
+                "shell-protocol-unavailable",
+                f"session {session!r} was given shell integration but has emitted "
+                f"no command markers at all",
+                hint="the shell's own startup files likely replaced the injected "
+                     "hooks (starship/powerline rewrite PROMPT_COMMAND every "
+                     "prompt). Use --until 'regex' --since-send or print your own "
+                     "sentinel; `trace -n " + session + " --format json` shows "
+                     "what actually came through.",
+                evidence=ev())
+        if (fg in ("", _managed_shell(state))
+                and not records.markers_seen(session, since_offset)
+                and (records.output_age_s(session) or 0) > 1.0):
+            return TDError(
+                "shell-protocol-unavailable",
+                f"the marker channel went silent: this session emitted OSC 133 "
+                f"before, nothing since the last send",
+                hint="a prompt framework likely took PROMPT_COMMAND back after our "
+                     "injection. The pane has also produced no output for over a "
+                     "second, so 'still running' is the less likely reading: "
+                     "switch to --until 'regex' --since-send, or read `out`. "
+                     "Do not send a quit key on the strength of this alone.",
+                evidence=ev({"last_output_age_s": records.output_age_s(session)}))
+    return None
 
 
 def shell_ready_unmet(ctx, cond: "AllOf") -> bool:

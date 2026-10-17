@@ -427,6 +427,9 @@ def cmd_wait(args) -> int:
     def pane_meta() -> dict:
         return tmuxio.meta(target)
 
+    # Built before the conditions: --done's early "this channel cannot answer"
+    # check wants screen evidence, and it runs while the oracle is being chosen.
+    ctx = waiting.WaitContext(capture, pane_meta)
     conditions: list = []
     managed = state is not None
     via: str | None = None
@@ -470,6 +473,13 @@ def cmd_wait(args) -> int:
     if args.done:
         # Strongest oracle this target actually supports — the agent should
         # not have to know which of our channels its pane can satisfy.
+        dead = waiting.protocol_diagnosis(target.session, state, pane_meta(),
+                                          (state or {}).get("last_send_offset", 0),
+                                          ctx)
+        if dead is not None and state is not None:
+            # A passthrough foreground or a silent channel is knowable now;
+            # burning the timeout on it teaches agents to distrust waits.
+            raise dead
         oracle = waiting.choose_done_oracle(state)
         via = waiting.DONE_VIA[oracle]
         if oracle == "probe":
@@ -513,7 +523,6 @@ def cmd_wait(args) -> int:
                            "--exit, --quiet-ms, or --until 'regex' "
                            "(add --since-send to match only new output)")
     cond = waiting.AllOf(conditions)
-    ctx = waiting.WaitContext(capture, pane_meta)
 
     deadline = time.monotonic() + args.timeout
     while True:
@@ -553,6 +562,10 @@ def cmd_wait(args) -> int:
         if time.monotonic() >= deadline:
             break
         time.sleep(args.interval)
+    dead = waiting.protocol_diagnosis(target.session, state, pane_meta(),
+                                      (state or {}).get("last_send_offset", 0), ctx)
+    if dead is not None and (args.cmd_done or args.shell_ready or args.done):
+        raise dead
     if args.shell_ready and waiting.shell_ready_unmet(ctx, cond):
         # The probe timeout IS the signal: a live interactive program swallows
         # `true` instead of letting bash execute it. Surface it as its own
