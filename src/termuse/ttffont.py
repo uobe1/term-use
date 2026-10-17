@@ -31,9 +31,11 @@ class Face:
         self.fixed_pitch: bool | None = None
         self.underline: tuple[int, int] | None = None   # (position, thickness)
         self.units_per_em: int | None = None
-        self._segments: list[tuple[int, int, int, int]] | None = None  # fmt 4
-        self._ro_base: int = 0
-        self._groups: list[tuple[int, int, int]] | None = None         # fmt 12/13
+        # One entry per cmap subtable we could read: (segments, ro_base) for
+        # format 4, groups for format 12/13. Kept separate because
+        # idRangeOffset is relative to an address inside its own subtable.
+        self._fmt4: list[tuple[list[tuple[int, int, int, int]], int]] = []
+        self._fmt12: list[list[tuple[int, int, int]]] = []
         self._unknown = True
         self._data = b""
         try:
@@ -42,7 +44,7 @@ class Face:
             self._parse()
         except Exception as exc:  # a strange font must not kill the channel
             self.error = f"{type(exc).__name__}: {exc}"
-            self._segments = self._groups = None
+            self._fmt4, self._fmt12 = [], []
             self._unknown = True
 
     # -- table directory ---------------------------------------------------
@@ -80,36 +82,37 @@ class Face:
             raise ValueError("no cmap table")
         off = tables["cmap"][0]
         n = struct.unpack_from(">H", data, off + 2)[0]
-        # Prefer full-Unicode subtables over BMP-only ones: a face whose (3,10)
-        # cmap lists the PUA while its (3,1) does not must still be usable.
-        priority = {(3, 10): 0, (0, 6): 1, (0, 4): 2, (0, 3): 3, (3, 1): 4,
-                    (0, 0): 5, (2, 10): 6, (3, 0): 7, (1, 0): 8}
-        best = None
+        # Read every subtable we understand and union the coverage. Picking one
+        # "best" encoding is a guess about which one a given rasterizer will
+        # use, and a face that lists more in (0,3) than (3,1) (or the reverse)
+        # would then be judged by the wrong map.
         for i in range(n):
             plat, enc, sub = struct.unpack_from(">HHI", data, off + 4 + 8 * i)
-            prio = priority.get((plat, enc), 20)
-            if best is None or prio < best[0]:
-                best = (prio, sub)
-        if best is None:
-            raise ValueError("cmap has no encodings")
-        self._read_cmap(off + best[1])
+            self._read_cmap(off + sub)
+        if not (self._fmt4 or self._fmt12):
+            raise ValueError("no readable cmap subtable")
 
     def _read_cmap(self, sub: int) -> None:
         data = self._data
         fmt = struct.unpack_from(">H", data, sub)[0]
         if fmt in (12, 13):
             groups = struct.unpack_from(">I", data, sub + 12)[0]
-            self._groups = [struct.unpack_from(">III", data, sub + 16 + 12 * i)
-                            for i in range(groups)]
+            self._fmt12.append([struct.unpack_from(">III", data, sub + 16 + 12 * i)
+                                for i in range(groups)])
             self._unknown = False
         elif fmt == 4:
+            # Subtable header is format/length/language/segCountX2 and then
+            # THREE more UINT16s (searchRange, entrySelector, rangeShift)
+            # before endCode[] — skipping them shifts every later offset by 6
+            # bytes, which reads ASCII fine (it lands in a delta segment) and
+            # silently mis-covers the rest of the BMP.
             seg = struct.unpack_from(">H", data, sub + 6)[0] // 2
-            ends = struct.unpack_from(f">{seg}H", data, sub + 8)
-            starts = struct.unpack_from(f">{seg}H", data, sub + 10 + 2 * seg)
-            deltas = struct.unpack_from(f">{seg}h", data, sub + 10 + 4 * seg)
-            ranges = struct.unpack_from(f">{seg}H", data, sub + 10 + 6 * seg)
-            self._segments = list(zip(starts, ends, deltas, ranges))
-            self._ro_base = sub + 10 + 6 * seg
+            ends = struct.unpack_from(f">{seg}H", data, sub + 14)
+            starts = struct.unpack_from(f">{seg}H", data, sub + 16 + 2 * seg)
+            deltas = struct.unpack_from(f">{seg}h", data, sub + 16 + 4 * seg)
+            ranges = struct.unpack_from(f">{seg}H", data, sub + 16 + 6 * seg)
+            self._fmt4.append((list(zip(starts, ends, deltas, ranges)),
+                               sub + 16 + 6 * seg))
             self._unknown = False
         else:
             # 0/2/6/8/10: rare today. Trust the font rather than claim coverage
@@ -118,32 +121,36 @@ class Face:
 
     # -- queries -----------------------------------------------------------
     def covers(self, ch: str) -> bool | None:
-        """True/False from this face's own cmap; None when we cannot tell."""
+        """True/False from this face's own cmap; None when we cannot tell.
+
+        Union across subtables: any map that resolves the codepoint to a
+        non-zero glyph means the face can draw it.
+        """
         if self._unknown:
             return None
         cp = ord(ch)
-        if self._groups is not None:
-            for start, end, glyph_start in self._groups:
-                if start <= cp <= end:
-                    return glyph_start != 0
-            return False
-        if self._segments is not None:
-            for i, (start, end, delta, rng) in enumerate(self._segments):
+        for groups in self._fmt12:
+            for start, end, glyph_start in groups:
+                if start <= cp <= end and glyph_start != 0:
+                    return True
+        for segments, ro_base in self._fmt4:
+            for i, (start, end, delta, rng) in enumerate(segments):
                 if not (start <= cp <= end) or start == BMP:
                     continue
                 if rng == 0:
-                    return ((cp + delta) & 0xFFFF) != 0
+                    if ((cp + delta) & 0xFFFF) != 0:
+                        return True
+                    break
                 # idRangeOffset is a byte offset *relative to its own address*,
                 # which is how the spec indexes glyphIdArray without storing it.
-                at = self._ro_base + 2 * i + rng + 2 * (cp - start)
+                at = ro_base + 2 * i + rng + 2 * (cp - start)
                 if at + 2 > len(self._data):
                     return None
                 g = struct.unpack_from(">H", self._data, at)[0]
-                if g == 0:
-                    return False
-                return ((g + delta) & 0xFFFF) != 0
-            return False
-        return None
+                if g != 0 and ((g + delta) & 0xFFFF) != 0:
+                    return True
+                break
+        return bool(self._fmt12 or self._fmt4) and False
 
 
 def load(path: str) -> Face:
