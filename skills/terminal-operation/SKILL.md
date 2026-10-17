@@ -69,11 +69,18 @@ opening `raw.log` yourself.
   the string is emitted after your send. Settle it by reproduction in a scratch copy: run
   the preflight there, then the real thing, and see which one creates the artifact. Two
   calls, and it ends the argument.
-- `--quiet-ms` proves the *display* stopped changing, not that the program finished; while a
-  command is in flight its verdict carries `program_running: true` and a `note`. When
+- `--quiet-ms` proves the *display* stopped changing, not that the program finished; while
+  a command is in flight its verdict carries `program_running: true` and a `note`. When
   `--done` itself times out, read `evidence.in_flight`: true means it started and has not
   finished, so the next move is a longer `--timeout` or the input it is waiting for — never
   a looser `--until`.
+- **Probe a stateful CLI without writing to it.** Ask for `--help`, or pass an unknown
+  *flag* (`--nope`); do not probe with an unknown positional word — a program that takes
+  one argument may accept `bogus` as legitimate input and record it. A refusal that prints
+  `usage:` and exits 2 is the safe answer, and it names every subcommand at once.
+- **When it is silent and persists, find the artifact by time, not by name.** `send`
+  `touch .probe` before the run, then `find . -newer .probe` after it: the new file *is*
+  the completion record. Open it read-only (`"file:x.db?mode=ro", uri=True`).
 
 ## Choosing a channel
 
@@ -133,7 +140,7 @@ opening `raw.log` yourself.
 | `shell-protocol-unavailable` | the fact channel **cannot** answer here (foreground is `ssh`/`mosh`/nested `tmux`, or the hooks were replaced) | change channel: `--until 'regex' --since-send`, or print your own sentinel. Never a quit key on this alone — check `evidence.screen`: an idle prompt means the hooks died, a program asking for input means send it |
 | `unmanaged-pane` | term-use did not start that pane (no recording) | `--until`/`--quiet-ms`/`screen`/`send`/`clear` still work at degraded confidence; start your own session if you need fact-level waits |
 | `no-shell-integration` | this shell emits no completion markers | `--cmd bash`/`--cmd zsh` for injected hooks, or wait on program output / `--exit` |
-| `socket-unreachable` | tmux itself is unreachable | honour the hint: `--socket NAME`, and check `TMUX_TMPDIR` |
+| `socket-unreachable` | tmux itself is unreachable — one fault reports one code, from `send`, `wait` and `stop` alike | honour the hint: `--socket NAME`, check `TMUX_TMPDIR`. If `sessions` answers `[]` while a server is alive (`pgrep -aft 'tmux.*NAME'`), the socket file was removed underneath it: `tmux -L NAME kill-server`, then start again |
 | `pane-dead` / `pane-dead-by-signal` | the target died mid-wait | read the signal name from the evidence; respawn if needed |
 | `pillow-missing` / `font-missing` | image channel unavailable | use the text channels (a font ships as a last resort, so this is rare) |
 

@@ -26,8 +26,11 @@ if ! out=$($TD sessions --socket "$SOCK" 2>"$TMP/s.err"); then
   fail "sessions on a socket with no server yet must succeed, got: $(cat "$TMP/s.err")"
 fi
 [ "$out" = "[]" ] || fail "expected an empty list, got: $out"
-grep -qi 'no tmux server .* yet' "$TMP/s.err" \
-  || fail "the empty answer must still be explained on stderr: $(cat "$TMP/s.err")"
+# The note must explain the empty answer AND name both readings, because tmux
+# cannot tell "never started" from "a live server whose socket file was removed".
+grep -qi 'no socket file' "$TMP/s.err" || fail "the empty answer must be explained on stderr: $(cat "$TMP/s.err")"
+grep -qi 'either' "$TMP/s.err" && grep -qi 'kill-server\|start' "$TMP/s.err" \
+  || fail "the note must cover both readings: $(cat "$TMP/s.err")"
 
 $TD start -n td30 --cmd bash --socket "$SOCK" --width 90 --height 24 >/dev/null \
   || fail "start failed"
@@ -35,10 +38,13 @@ $TD wait -n td30 --socket "$SOCK" --shell-ready --timeout 15 >/dev/null \
   || fail "shell not ready"
 
 # --- 1. quiet settles, but must not be misread as completion ---------------
-$TD send -n td30 --socket "$SOCK" --type "python3 -c 'import time; time.sleep(6)'" \
+# Durations are deliberately long: every CLI call on this box costs 0.5-3s of
+# process startup, so a `sleep 4` under test can finish while the test is still
+# between two waits — which is a bug in the test, not in the tool.
+$TD send -n td30 --socket "$SOCK" --type "python3 -c 'import time; time.sleep(25)'" \
   --key Enter >/dev/null || fail "send failed"
 sleep 1.5                       # the echo has landed; the program is now silent
-$TD wait -n td30 --socket "$SOCK" --quiet-ms 700 --timeout 5 \
+$TD wait -n td30 --socket "$SOCK" --quiet-ms 700 --timeout 6 \
   >"$TMP/quiet.json" 2>&1 || fail "quiet should settle on a still screen"
 python3 -c "
 import json
@@ -52,7 +58,7 @@ assert 'repainting' in n and '--done' in n, f'the note must name the boundary: {
 " || fail "quiet honesty (see above)"
 
 # and the completion question is still answerable, at fact level
-$TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 20 \
+$TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 35 \
   | python3 -c '
 import json, sys
 v = json.load(sys.stdin)
@@ -60,16 +66,13 @@ assert v["confidence"] == "fact" and v["exit_code"] == 0, v
 assert "note" not in v, f"--done has nothing to caveat: {v}"
 ' || fail "--done must still prove completion after the silent stretch"
 
-# --- 1b. a timeout on a command that is still running must say so -----------
-# The a6 arms both hit this: `--done` timing out mid-run produced a hint
-# pointing at a looser --until, which is the wrong advice for a program that is
-# simply still working. C-without-D in our own recording is the fact.
-$TD send -n td30 --socket "$SOCK" --type "python3 -c 'import time; time.sleep(9)'" \
+# --- 1b/1c. a timeout on a command that is still running must say so --------
+# One wait, not two: chaining waits here turns the test's own process startup
+# into a race against the program. The same command is then followed to its
+# fact-level completion, so the sequence proves both halves of the claim.
+$TD send -n td30 --socket "$SOCK" --type "python3 -c 'import time; time.sleep(12)'" \
   --key Enter >/dev/null || fail "send failed"
-sleep 1.5
-if $TD wait -n td30 --socket "$SOCK" --done --timeout 2 >/dev/null 2>&1; then
-  fail "--done must not meet while the sleep runs"
-fi
+sleep 2
 $TD wait -n td30 --socket "$SOCK" --done --timeout 2 2>"$TMP/mid.json" || true
 python3 -c "
 import json
@@ -80,12 +83,14 @@ assert e['evidence'].get('in_flight') is True, \
 h = e['hint'] or ''
 assert 'mid-flight' in h and 'loosen' in h, f'the hint must retract the --until advice: {h}'
 " || fail "in-flight timeout (see above)"
+
+# and the completion question is still answerable, at fact level
 $TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 25 >/dev/null \
-  || fail "the long sleep never completed"
+  || fail "--done must reach fact once the silent command finishes"
 
 # --- 1c. trace says when the session started, so elapsed maps to wall clock -
 $TD trace -n td30 --socket "$SOCK" 2>/dev/null | head -1 | grep -q 'started=' \
-  || fail "trace's header must carry the recording's start time (both a6 arms parsed raw.log by hand to attribute a file write)"
+  || fail "trace's header must carry the recording's start time (elapsed alone cannot be attributed to a file write)"
 
 # --- 2. a colored traceback is not a redrawn program -----------------------
 $TD send -n td30 --socket "$SOCK" --type "python3 -c 'raise ValueError(1)'" \
@@ -112,6 +117,15 @@ $TD out -n td30 --socket "$SOCK" --all >/dev/null 2>"$TMP/paint.err" \
   || fail "out on the painting program failed"
 grep -qi 'repositions text with cursor escapes' "$TMP/paint.err" \
   || fail "a program that really repaints must still be flagged: $(cat "$TMP/paint.err")"
+
+# --- 4. `sessions -n` answers "is my session there?" in one call ------------
+$TD sessions -n td30 --socket "$SOCK" 2>/dev/null | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+assert len(rows) == 1 and rows[0]["name"].startswith("td30"), rows
+' || fail "sessions -n must filter to the one session"
+$TD sessions -n notthere --socket "$SOCK" 2>/dev/null | grep -q '^\[\]$' \
+  || fail "sessions -n on an absent name is an empty list, not an error"
 
 $TD stop -n td30 --socket "$SOCK" >/dev/null
 echo "E2E-30 PASS"

@@ -27,8 +27,14 @@ def _run_or_die(target: tmuxio.Target, args: list[str], what: str) -> None:
     # tmux parses options strictly before positionals: -t must come first,
     # otherwise it lands in the pane as literal keys.
     res = tmuxio.tmux("send-keys", "-t", target.to_arg(), *args, socket=target.socket)
-    if res.returncode != 0:
-        raise TDError("session-missing", res.stderr.strip() or f"send-keys failed: {what}")
+    if tmuxio.ok(res):
+        return
+    # classify, never assume: one dead socket must give one code from every
+    # subcommand, not `session-missing` here and `socket-unreachable` there.
+    code, hint = tmuxio.classify(res)
+    raise TDError("session-missing" if code == "tmux-failed" else code,
+                  (res.stderr or "").strip() or f"send-keys failed: {what}",
+                  hint=hint)
 
 
 def mouse_encode(button: int, x: int, y: int, press: bool) -> str:

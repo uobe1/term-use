@@ -79,8 +79,8 @@ def cmd_sessions(args) -> int:
         # "no server running" is an honest empty list; so is tmux's other answer
         # for a private socket that has never been started (`error connecting to
         # … (No such file or directory)`) — the recommended workflow says "use a
-        # private --socket", and both arms of the ab_write A/B read that rc=1 as
-        # an environment fault before their first `start`. Anything else tmux
+        # private --socket", and a caller that sees rc=1 there will read it as an
+        # environment fault before its first `start`. Anything else tmux
         # complains about must still surface, not be reported as an empty room.
         msg = (res.stderr or "").strip()
         low = msg.lower()
@@ -88,14 +88,23 @@ def cmd_sessions(args) -> int:
             rows = []
         elif "no such file or directory" in low and "error connecting" in low:
             rows = []
-            print(f"note: no tmux server on socket {args.socket!r} yet — that is "
-                  f"an empty list, not a failure; start one with "
-                  f"`term-use start -n NAME --socket {args.socket}`",
+            # Two states look identical to tmux here: nothing has ever been
+            # started on this socket, or a running server had its socket file
+            # removed underneath it. Both have been measured — a live server
+            # PID and no socket file. Say both, with the check.
+            print(f"note: no socket file for {args.socket!r}. Either nothing has "
+                  f"been started on it yet — start one with `term-use start -n "
+                  f"NAME --socket {args.socket}` — or a running server lost its "
+                  f"socket: `pgrep -aft 'tmux.*{args.socket}'` shows whether a "
+                  f"server is alive, and `tmux -L {args.socket} kill-server` "
+                  f"clears an orphan. Listing is empty either way, not failed.",
                   file=sys.stderr)
         else:
             code, hint = tmuxio.classify(res)
             raise TDError(code, msg or f"tmux failed (exit {res.returncode})",
                           hint=hint)
+    if getattr(args, "name", None):
+        rows = [r for r in rows if r["name"] == args.name]
     print(json.dumps(rows, ensure_ascii=False))
     return 0
 
@@ -207,9 +216,14 @@ def cmd_stop(args) -> int:
         return 0
     writer = records.V2Writer(state["session"])
     res = tmuxio.tmux("kill-session", "-t", state["session"], socket=state.get("socket"))
-    if res.returncode != 0:
-        raise TDError("session-missing",
-                      res.stderr.strip() or f"session {state['session']!r} already gone")
+    if not tmuxio.ok(res):
+        # classify, like every other tmux call: a missing socket is not a
+        # missing session, and an agent told to "list what is there" while its
+        # server is unreachable is chasing the wrong thing.
+        code, hint = tmuxio.classify(res)
+        raise TDError("session-missing" if code == "tmux-failed" else code,
+                      res.stderr.strip() or f"session {state['session']!r} already gone",
+                      hint=hint)
     writer.append("m", {"event": "stop"})
     state["stopped"] = True
     writer.state = state
@@ -987,9 +1001,8 @@ def cmd_trace(args) -> int:
             if isinstance(ev, dict):  # v2 header
                 # `started=` carries the recording's own epoch so every
                 # `[elapsed]` below can be turned into wall-clock without
-                # reading raw.log by hand. Both arms of the a6 A/B needed this:
-                # attributing "which invocation wrote this file" is otherwise
-                # guesswork against an mtime. One line, paid once.
+                # reading raw.log by hand. Attributing "which invocation wrote
+                # this file" is otherwise guesswork against an mtime.
                 start = ev.get("timestamp")
                 if start:
                     stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(start))
@@ -1167,6 +1180,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("sessions", help="list tmux sessions on a socket")
     p.add_argument("--socket", default=None, help="tmux socket name (-L); default socket if omitted")
+    # `-n` everywhere else means "which session"; here it means "filter to one".
+    # Refusing it with raw argparse text breaks the one-promise-per-failure rule
+    # for the obvious question ("is my session there?").
+    p.add_argument("-n", "--name", default=None, metavar="SESSION",
+                   help="list only this session (empty array if it is not there)")
     p.set_defaults(func=cmd_sessions)
 
     p = sub.add_parser("trace", help="project raw.log (human summary or raw NDJSON)")

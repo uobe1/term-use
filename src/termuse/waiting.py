@@ -596,9 +596,9 @@ class QuietCondition(Condition):
                 return False
         # Gate 2: screen snapshot stability across spaced samples.
         if self._last == sample:
-            # Settled means the DISPLAY stopped changing. Both arms of the
-            # ab_write A/B read the `met` as "the command finished" and were
-            # wrong twice, so the verdict now says which of the two it is:
+            # Settled means the DISPLAY stopped changing. A `met` here is
+            # routinely read as "the command finished", which it is not
+            # necessarily, so the verdict says which of the two it is:
             # a program still holding the pane (or tmux 3.8 saying so) is
             # reported alongside, and `--done` is named as the completion
             # question. Refusing to settle here would break the legitimate
@@ -822,10 +822,10 @@ def in_flight(session: str, since_offset: int) -> bool:
     """A command started after that offset and has not reported completion.
 
     `C` with no following `D` in term-use's own recording — so it works on every
-    tmux version, unlike `pane_command_running`. This is the reading that was
-    missing from the tester's three-way ambiguity and from both a6 arms' timeouts:
-    *this is a command still running*, not a dead channel and not a program
-    sitting on the shell, and it must not come with a "loosen your --until" hint.
+    tmux version, unlike `pane_command_running`. Without this reading a timeout is
+    three-way ambiguous: *this is a command still running*, not a dead channel and
+    not a program sitting on the shell, and it must not come with a "loosen your
+    --until" hint.
     """
     try:
         text = records.stream_since(session, since_offset)

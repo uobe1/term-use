@@ -32,9 +32,9 @@ from termuse.errors import TDError
 # What makes linear text a *lie* about the frame: a program that switches to the
 # alternate screen, clears, or moves the cursor to repaint cells. Deliberately
 # narrow — an earlier substring list matched `\x1b[1;` (bold SGR: every colored
-# Python traceback) and a bare `\x1b[H` (bash repainting its own prompt on C-l),
-# and both arms of the ab_write A/B were sent down a `replay` detour by that
-# false positive. Bracketed paste (`?2004`) and color codes are not redraw.
+# Python traceback) and a bare `\x1b[H` (bash repainting its own prompt on C-l);
+# that false positive sends the reader on a `replay` detour for no reason.
+# Bracketed paste (`?2004`) and color codes are not redraw.
 _REDRAW_RE = re.compile(
     r"\x1b\[\?(?:47|1047|1049)h"      # enter alternate screen
     r"|\x1b\[2J"                       # erase whole screen
