@@ -9,7 +9,7 @@ agent-first, in the spirit of open-source AI-skill projects like
 the agent*, the CLI is the tool interface, and every answer comes with evidence
 attached.
 
-![version](https://img.shields.io/badge/version-2.0.0a4-orange)
+![version](https://img.shields.io/badge/version-2.0.0a5-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
 ![requires](https://img.shields.io/badge/external%20dep-tmux%203.2a%2b-1BB91F)
 ![stars](https://img.shields.io/github/stars/uobe1/term-use?style=social)
