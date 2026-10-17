@@ -42,8 +42,8 @@ that can read a file or URL. Repo: **https://github.com/uobe1/term-use**
 ```text
 Read docs/en/installation.md in the term-use repo
 (https://github.com/uobe1/term-use) and install term-use by following it:
-install the `term-use` CLI and the `terminal-operation` skill into
-my agent. Tell me what you did.
+the `term-use` CLI (Step 1) and the `terminal-operation` skill (Step 2), both
+for the current user unless I say otherwise. Tell me what you did.
 ```
 
 If the agent can only fetch URLs (not local files), use the raw link instead:
@@ -66,8 +66,8 @@ patterns and hard-won pitfalls. It is not a debugging-only document: it covers a
 terminal work your agent does — driving an interactive program, **running real tests and E2E
 scenarios to completion**, reproducing an issue, confirming a command finished with its exit
 code, reading or screenshotting a screen, and keeping the context bill down. It is installed
-automatically as part of [Installation](#installation) (copied/linked into your agent's skills
-directory) and triggers by description, so your agent just works. Read it standalone:
+as its own step of [Installation](#installation) — copied or linked into a skills directory
+at user, project or system scope — and triggers by description, so your agent just works. Read it standalone:
 [SKILL.md](skills/terminal-operation/SKILL.md).
 
 ## The basic workflow

@@ -43,8 +43,11 @@ $TD out   -n demo --socket "$SOCK"          # what it printed, inside a byte bud
 ```
 
 `--socket NAME` belongs on **every** subcommand, not only on `sessions`; a private socket
-with no server yet answers `[]` (with a note), not an error. Stop what you start: `stop`
-(killing the last session takes the tmux server, and any nested sessions, with it).
+with no server yet answers `[]` (with a note), not an error. `wait` defaults to
+`--timeout 10 --interval 0.1` — 10s is a shell, not a build, so name a real number — and
+`--done` is the recommended condition, not the CLI's default one; say it. Stop what you
+start: `stop` (killing the last session takes the tmux server, and any nested sessions,
+with it).
 
 Two facts that save a call each: **a met `wait` verdict already carries the screen** in
 `evidence.screen` (re-reading after a met wait is usually redundant), and **`trace`'s
@@ -59,6 +62,8 @@ opening `raw.log` yourself.
 - **No output + `exit_code: 0` is a finding.** Report it. Do not re-send hoping for print.
 - **Re-running is itself a write.** Before repeating a silent command, ask if it is
   idempotent — usually not; a second run corrupts state while both exits still read 0.
+  Chain the proof onto the step instead of repeating it: `step && cat artifact`. One send
+  then carries both the write and the read that shows it landed once.
 - **Existence is not content.** `sqlite3.connect("x.db")` creates an empty file the moment
   a check opens it. Assert what only the program could have written (rows, a version
   pragma, a byte count), never a path. Reading program-written state is legitimate
@@ -80,14 +85,15 @@ opening `raw.log` yourself.
   `usage:` and exits 2 is the safe answer, and it names every subcommand at once.
 - **When it is silent and persists, find the artifact by time, not by name.** `send`
   `touch .probe` before the run, then `find . -newer .probe` after it: the new file *is*
-  the completion record. Open it read-only (`"file:x.db?mode=ro", uri=True`).
+  the completion record. Open it read-only (`"file:x.db?mode=ro", uri=True`). Skip the
+  probe when you already know what it writes — the point is the unknown case.
 
 ## Choosing a channel
 
 | Question | Use |
 |---|---|
 | Did my command finish? what code? | `wait --done [--expect-code C]` |
-| What did it print? | `out` (since your last send; `--all` for the session) |
+| What did it print? | `out` (since your last send; `--all` for the session) — but after a chained `cmd && cat artifact` the met wait's own `evidence.screen` already holds the answer, so do not also call `out` |
 | Which row is highlighted / what color / is X on screen / where do I click? | `screen --grep --attr reverse` / `--find TEXT` (1-based, click-ready) / `--element-at X Y` |
 | Is anything on screen at all, or did my input never land? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` |
 | Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`), a met `--quiet-ms` says it (`program_running`); `pane_current_command` is only a hint — measured on 3.7c it reported `bash` 1.2s into a `sleep 5` |

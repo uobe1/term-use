@@ -14,7 +14,10 @@ term-use is **two parts**:
 2. the **agent skill** (`terminal-operation`) — the manual that teaches
    your agent *when and how* to drive it.
 
-Install **both**. There are two ways to do it — pick whichever fits.
+They install separately, and each has three scopes: **current user**, **one project**,
+**whole system**. Install **both** parts; pick the scope that fits per part (the
+defaults in [Install steps](#install-steps) are current user for both). There are two
+ways to do it — pick whichever fits.
 
 ## Requirements
 
@@ -60,21 +63,23 @@ Copy one of these prompts and send it to your agent:
 
 ```text
 Read docs/en/installation.md in the term-use repo (https://github.com/uobe1/term-use)
-and install term-use by following it: install the `term-use` CLI and the
-`terminal-operation` skill into my agent. Tell me what you did and where
-each part landed.
+and install term-use by following it: the `term-use` CLI (Step 1) and the
+`terminal-operation` skill (Step 2), both for the current user unless I say
+otherwise. Ask me before choosing a project or system scope. Tell me what you did
+and where each part landed.
 ```
 
 If the agent can only fetch URLs (not local files), use the raw link instead:
 
 ```text
 Read https://raw.githubusercontent.com/uobe1/term-use/main/docs/en/installation.md and
-install term-use by following it: install the `term-use` CLI and the
-`terminal-operation` skill into my agent. Tell me what you did.
+install term-use by following it: the CLI (Step 1) and the skill (Step 2), both for
+the current user unless I say otherwise. Tell me what you did.
 ```
 
-The agent follows the [Install steps](#install-steps) below — it installs the CLI
-*and* the skill. No separate script is needed; the doc is the instruction set.
+The agent follows the [Install steps](#install-steps) below — the CLI and the skill
+are two artifacts with separate scopes, so it installs both and says where each
+landed. No separate script is needed; the doc is the instruction set.
 
 ---
 
@@ -98,69 +103,123 @@ available. Pick one — not both.
 Both options run these steps. The agent runs them from Option A; you run them from
 Option B.
 
+term-use is **two artifacts that install differently**, and you pick a scope for each:
+
+| Artifact | What it is | Installed by | Scopes |
+|---|---|---|---|
+| **CLI** | the `term-use` executable — a Python package | `uv tool install`, `pip`, or a venv | user · project · system |
+| **Skill** | `skills/terminal-operation/` — documentation, no code, nothing to run | copy or symlink the directory | user · project · system |
+
+They are independent: the CLI works without the skill (read `--help`), and the skill
+is dead weight without the CLI. The scopes are independent too — a system-wide CLI
+with a per-project skill is a normal setup.
+
 ### Step 1 — install the CLI
 
-Pick one method. uv manages an isolated tool environment; pip installs into whatever
-environment is currently active; the local-clone method is for development.
-
-**uv (recommended)**
+**For the current user** (default, and what `uv` does by itself):
 
 ```bash
 uv tool install git+https://github.com/uobe1/term-use.git
-```
-
-For screenshot support, add Pillow to the tool environment:
-
-```bash
+# image channel (screenshot) needs Pillow in the tool environment:
 uv tool install git+https://github.com/uobe1/term-use.git --with pillow
 ```
 
-**pip**
+The 2.0 line is developed on its own alpha branches and `main` still carries the older
+`term-debug` layout, so if you need 2.0 before it merges, install from a clone checked
+out at the branch you want — do not bake a ref into the command above:
 
 ```bash
-python3 -m pip install git+https://github.com/uobe1/term-use.git
+git clone https://github.com/uobe1/term-use.git && cd term-use
+uv tool install . --with pillow        # or `uv tool install -e .` to hack on it
 ```
 
-**From a local clone (development)**
+The executable lands in `~/.local/bin`; if `term-use --help` is not found, that
+directory is not on `PATH` — run `uv tool update-shell` or export
+`PATH="$HOME/.local/bin:$PATH"`.
+
+**For one project** — install it into that project's own environment, so the version
+is pinned with the project and nothing global is touched:
 
 ```bash
-git clone https://github.com/uobe1/term-use.git
-cd term-use
-uv tool install -e .      # editable: source edits take effect immediately
+cd /path/to/my-project
+uv venv && uv pip install --editable /path/to/term-use          # or the git URL
+uv run term-use --help                                          # inside the venv
 ```
 
-To run once without installing anything:
+Without `uv`, the same thing is `python3 -m venv .venv && .venv/bin/pip install /path/to/term-use`,
+then call `.venv/bin/term-use`. An agent working in that project can also skip the
+install entirely and run the source checkout: `PYTHONPATH=/path/to/term-use/src python3 -m termuse …`.
+
+**For every user on the machine** — a venv in a shared read-only location plus one
+symlink on `PATH`. This keeps the system Python untouched (no distro-package conflict)
+and gives every account the same version:
+
+```bash
+sudo python3 -m venv /opt/term-use
+sudo /opt/term-use/bin/pip install "term-use[image] @ git+https://github.com/uobe1/term-use.git"
+sudo ln -s /opt/term-use/bin/term-use /usr/local/bin/term-use
+```
+
+`pip install` on its own (`python3 -m pip install git+…`) also works and goes wherever
+the active environment points — which is exactly why the two scopes above spell out
+which environment that is.
+
+To try it without installing anything at all:
 
 ```bash
 uvx --from . term-use --help
 ```
 
-If `term-use --help` is not found after a uv install, uv's tool bin
-(`~/.local/bin`) is not on `PATH` — run `uv tool update-shell` or export
-`PATH="$HOME/.local/bin:$PATH"`.
-
 ### Step 2 — install the skill
 
 The skill is the `skills/terminal-operation/` directory in this repo — a core
 `SKILL.md` plus the `references/` it points at. Install the whole directory, not
-just the core.
+just the core. It is documentation, so nothing is compiled or run: an "install" is
+one copy or one symlink, and the only choice is which scope should see it.
 
-Use `~/.agents/skills/`: a shared location that most agents read, so one install
-serves all of them. For a single project instead, use its `./.agents/skills/`.
+**For the current user** — `~/.agents/skills/`, the location most agents and
+`npx skills` already agree on, so one install serves all of them:
 
 ```bash
 SKILLS_DIR="$HOME/.agents/skills"; mkdir -p "$SKILLS_DIR"
-ln -s "$PWD/skills/terminal-operation" "$SKILLS_DIR/terminal-operation"
+ln -s /path/to/term-use/skills/terminal-operation "$SKILLS_DIR/terminal-operation"
 ```
 
 A symlink stays current with `git pull`; to pin a version, copy instead:
 
 ```bash
-cp -r "$PWD/skills/terminal-operation" "$SKILLS_DIR/terminal-operation"
+cp -r /path/to/term-use/skills/terminal-operation "$SKILLS_DIR/terminal-operation"
 ```
 
-If your agent reads only its own directory, it is the same command with a
-different path:
+**For one project** — the same two commands pointed at the repository you are
+working in. Only agents opened in that project see it, and it travels with the
+repo, so a team shares one pinned version:
+
+```bash
+cd /path/to/my-project
+mkdir -p .agents/skills
+ln -s /path/to/term-use/skills/terminal-operation .agents/skills/terminal-operation
+```
+
+Add `.agents/` to `.gitignore` if you symlink (the path is machine-local); if you
+copy it, commit it and the project carries its own skill.
+
+**For every user on the machine** — one read-only copy in a shared place, then a
+symlink per account pointing at it. There is no cross-agent standard for a
+system-wide skills directory, so the shared copy plus per-user links is the form
+that works everywhere; if your own agent does document a system directory, put the
+link there instead and skip the per-user step:
+
+```bash
+sudo mkdir -p /usr/local/share/agents/skills
+sudo cp -r /path/to/term-use/skills/terminal-operation /usr/local/share/agents/skills/
+# then, as each user:
+mkdir -p "$HOME/.agents/skills"
+ln -s /usr/local/share/agents/skills/terminal-operation "$HOME/.agents/skills/terminal-operation"
+```
+
+If your agent reads only its own directory, everything above is the same command
+with a different path:
 
 | Agent | Skills directory |
 |---|---|
@@ -230,21 +289,33 @@ uv tool install git+https://github.com/uobe1/term-use.git@<commit>
 (No tags have been cut yet; pin a commit if you need stability.)
 
 If you installed the skill by symlink from a clone, re-run `git pull` in the clone to
-refresh it. If you copied it, re-copy from a fresh clone.
+refresh it. If you copied it, re-copy from a fresh clone — and if you installed the
+system-wide copy, refreshing `/usr/local/share/agents/skills/terminal-operation`
+updates every account whose symlink points at it.
 
 ## Uninstall
 
+Remove the two artifacts separately, from whichever scope you used.
+
+CLI:
+
 ```bash
-uv tool uninstall term-use
-# or
+uv tool uninstall term-use                    # current user
+.venv/bin/pip uninstall term-use              # one project (run from inside it)
+sudo rm -f /usr/local/bin/term-use && sudo rm -rf /opt/term-use   # system
+# or, if you installed with pip into an active environment:
 python3 -m pip uninstall term-use
 ```
 
-Remove the skill from your agent's skills directory:
+Skill:
 
 ```bash
-rm -rf "$SKILLS_DIR/terminal-operation"
+rm -rf "$SKILLS_DIR/terminal-operation"       # user or project scope
+sudo rm -rf /usr/local/share/agents/skills/terminal-operation   # system
 ```
+
+A symlinked skill is one link: removing it leaves the clone (and the shared system
+copy) untouched.
 
 Recordings under `$XDG_STATE_HOME/term-use/` are plain files; delete the
 directory for a full purge.
