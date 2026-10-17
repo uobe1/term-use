@@ -150,9 +150,27 @@ into the repo docs, not the skill body. Do not state a rule twice.
 
 Is a skill revision actually better? `tests/blind/ab_skill.sh` answers that with agents
 rather than opinion — objective verdict from the fixture's end state, weighted confusion
-self-report, plus wall clock / tokens / context bytes. Baselines are pinned by
+self-report, plus wall clock / tokens / `arm_metrics.py`'s transcript-measured cost
+(observations, tool-side bytes, peak context occupancy). Baselines are pinned by
 `OLD_SKILL_REF`; runs are archived under `~/evidence/term-use/ab/` with an `INDEX.md`
 entry, because an unarchived experiment is a story.
+
+Four rules that came out of running it, not from designing it:
+
+- **k>=2 waves, and quote the mean.** In the a6-vs-a5 round, wave 1 measured −33% wall
+  clock and −23% tokens; wave 2 measured −7% and **+4%**. The spread between waves is
+  bigger than several of the deltas, so a single wave's percentage is noise.
+- **`archive` takes the arm's state dirs.** An arm's `$XDG_STATE_HOME` is a mktemp path
+  outside its own tree, and the recordings — the only evidence of what the tool actually
+  returned — live there. Record `SOCK`/`TMPD`/wall/tokens in the round JSON too: one
+  round's recordings were nearly unrecoverable because nobody did.
+- **Move `AGENTS.md` out of the working tree while arms run.** It is auto-injected into
+  every arm's opening context and it names the fixture and its traps. Restore it
+  afterwards.
+- **The `writes` fixture's verdict axis has no resolving power.** Four consecutive arms
+  reached BOTH_OK with zero re-sends. It catches a careless arm (an a5 arm re-ran the
+  non-idempotent step and got caught), and it cannot prove a careful one — so cost and
+  confusion are the axes with signal, and `verdict` is a guard rail.
 
 ## Commit messages
 
