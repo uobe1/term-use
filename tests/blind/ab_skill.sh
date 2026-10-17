@@ -83,7 +83,7 @@ cmd="${1:-}"
 case "$cmd" in
   prepare | prompt) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
   score | confusion) arm=""; dir="${2:-}"; extra="${3:-}" ;;
-  archive) arm="$(basename "${2:-}" | sed 's/^ab-//; s/-r[0-9]*$//')"; dir="${2:-}"; extra="${3:-}"; report="${4:-}" ;;
+  archive) arm="$(basename "${2:-}" | sed 's/^ab[0-9]*-//; s/-r[0-9]*$//')"; dir="${2:-}"; extra="${3:-}"; report="${4:-}" ;;
   *) arm="${2:-}"; dir="${3:-}"; extra="${4:-}" ;;
 esac
 
@@ -265,17 +265,19 @@ print('verdict=' + ('BOTH_FIXED' if d and r else 'PARTIAL' if (d or r) else 'NOT
   esac
   ;;
 archive)
-  # `archive <arm-dir> <evidence-dir> [report-file]` — a run that is not kept is
-  # not auditable. Copies the arm's skill, its end state, term-use's own
-  # recordings and the environment that produced them, so a later reader can
-  # tell what was measured on what, without trusting anyone's summary.
-  DEST="$extra"
-  [ -d "$dir" ] && [ -n "$DEST" ] || { echo "usage: archive <arm-dir> <evidence-dir> [report]" >&2; exit 2; }
+  # `archive <arm-dir> <evidence-dir> [report-file] [state-dir ...]` — a run that
+  # is not kept is not auditable. Copies the arm's skill, its end state, term-use's
+  # own recordings and the environment that produced them, so a later reader can
+  # tell what was measured on what, without trusting anyone's summary. The state
+  # dirs are an argument because an arm's `$XDG_STATE_HOME` is a mktemp path
+  # outside its own tree — the recordings live there, not under `<arm-dir>`.
+  DEST="$extra"; states=("${@:5}")
+  [ -d "$dir" ] && [ -n "$DEST" ] || { echo "usage: archive <arm-dir> <evidence-dir> [report] [state-dir ...]" >&2; exit 2; }
   mkdir -p "$DEST"
   cp -r "$dir/skill" "$DEST/skill" 2>/dev/null || true
   mkdir -p "$DEST/app" && cp -a "$dir/app/." "$DEST/app/" 2>/dev/null || true
   mkdir -p "$DEST/recordings"
-  for raw in $(find "$dir" -name raw.log 2>/dev/null); do
+  for raw in $(find "$dir" ${states[@]+"${states[@]}"} -name raw.log 2>/dev/null); do
     session=$(basename "$(dirname "$raw")")
     mkdir -p "$DEST/recordings/$session"
     cp -a "$raw" "$(dirname "$raw")/state.json" "$DEST/recordings/$session/" 2>/dev/null || true
@@ -284,6 +286,8 @@ archive)
   { echo "arm=$arm  task=$TASK  when=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "tmux=$(tmux -V 2>&1)  python=$(python3 -V 2>&1)  arch=$(uname -m)"
     echo "repo_head=$(git -C "$ROOT" rev-parse --short HEAD)  tree_dirty=$(git -C "$ROOT" status --porcelain | wc -l)"
+    # env.txt is written at archive time; what the run actually used goes here.
+    [ -n "${PROVENANCE:-}" ] && echo "$PROVENANCE"
   } > "$DEST/env.txt"
   echo "archived $dir -> $DEST ($(find "$DEST" -type f | wc -l) files)"
   ;;
