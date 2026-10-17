@@ -7,6 +7,7 @@ mapping for numeric colors, truecolor passed through.
 """
 import glob
 import os
+import re
 
 from .errors import TDError
 from . import screen, glyphvec, ttffont
@@ -213,45 +214,110 @@ def theme() -> tuple[tuple, tuple]:
 
 
 # Faces worth trying after the primary, for the coverage a plain UI mono lacks:
-# symbol packs (Nerd Fonts), wide-coverage fallbacks (Unifont), CJK, emoji.
+# symbol packs (Nerd Fonts), wide-coverage fallbacks (Unifont), CJK (WenQuanYi,
+# Source Han, IPA, Droid Fallback — the one Android ships for exactly this job),
+# emoji.
 _FALLBACK_HINTS = ("nerd", "symbols", "unifont", "noto", "cjk", "source-han",
-                   "wqy", "wenquanyi", "emoji", "symbola", "free")
+                   "wqy", "wenquanyi", "emoji", "symbola", "free", "droid",
+                   "ipa", "misc")
 
 
-def fallback_fonts(primary: str, limit: int = 4) -> list[str]:
-    """Additional faces to consult per character, best coverage first."""
-    seen, out = {os.path.realpath(primary)}, []
+def _family(path: str) -> str:
+    """Family token of a font file name: version digits and style words out.
+
+    Seven `unifont-15.1.05*.otf` files are one family, and a family gets one
+    slot. Without this the variants filled the whole fallback budget and the
+    CJK face further down the directory listing was never opened (measured on
+    this box: `wqy-zenhei.ttc` ranked 34th of 35, unreachable behind four
+    unifonts — which is how issue #3's tofu was produced here, not only on the
+    reporter's device).
+    """
+    stem = os.path.splitext(os.path.basename(path))[0].lower().replace("_", "-")
+    stem = re.sub(r"\d+(\.\d+)*", "", stem)
+    for tok in ("-regular", "-roman", "-bold", "-oblique", "-italic", "-medium"):
+        stem = stem.replace(tok, "")
+    return stem or os.path.basename(path).lower()
+
+
+def fallback_fonts(primary: str, need: set[str] | None = None,
+                   limit: int = 4) -> list[str]:
+    """Additional faces to consult, ranked by the coverage *this* screen lacks.
+
+    Ranking by filename alone was the bug: the strongest-named hint won, so a
+    box full of one family got a chain of near-duplicates and no CJK. When the
+    caller passes `need` (the codepoints the primary face cannot draw), each
+    candidate's cmap is opened and scored on those, a face covering none of
+    them is dropped entirely, and the scan stops once the chain can draw
+    everything — so an ASCII screen pays for no fallback loading at all.
+    """
+    seen, by_family = {os.path.realpath(primary)}, {}
     for p in _candidate_paths(font_dirs()):
-        low = os.path.basename(p).lower()
+        low = os.path.basename(p).lower().replace("_", "-")
         if not any(h in low for h in _FALLBACK_HINTS):
             continue
         real = os.path.realpath(p)
         if real in seen:
             continue
         seen.add(real)
-        # symbol packs and Unifont exist to cover what UI fonts lack
-        score = 0 if ("nerd" in low or "symbols" in low or "unifont" in low) else 1
-        out.append((score, low, p))
-    return [p for _s, _l, p in sorted(out, key=lambda t: (t[0], t[1]))][:limit]
+        by_family.setdefault(_family(p), []).append(p)
+    picked = [sorted(paths, key=lambda q: (rank_style(os.path.basename(q)), q))[0]
+              for _fam, paths in by_family.items()]
+    if need is None:
+        # No coverage question asked: keep the old "symbol packs first" order.
+        scored = [(0 if any(h in os.path.basename(p).lower()
+                            for h in ("nerd", "symbols", "unifont")) else 1,
+                   os.path.basename(p).lower(), p) for p in picked]
+        return [p for _s, _n, p in sorted(scored, key=lambda t: (t[0], t[1]))][:limit]
+    wanted = set(need)
+    out: list[str] = []
+    for p in sorted(picked, key=lambda q: (
+            0 if any(h in os.path.basename(q).lower()
+                     for h in ("noto", "source-han", "cjk", "droid", "wqy")) else 1,
+            rank_style(os.path.basename(q)), os.path.basename(q))):
+        if not wanted:
+            break
+        face = ttffont.load(p)
+        hit = {ch for ch in wanted if face.covers(ch)}
+        if not hit:
+            continue                      # covers nothing this screen needs
+        wanted -= hit
+        out.append(p)
+        if len(out) >= limit:
+            break
+    return out
 
 
 class _Chain:
     """Primary + fallback faces, each with its loaded font and cmap reader."""
 
-    def __init__(self, primary: str, size: int, ImageFont):
-        self.entries = []
-        for path in [primary, *fallback_fonts(primary)]:
-            try:
-                font = ImageFont.truetype(path, size)
-            except OSError:
-                continue                      # unreadable face: skip it honestly
-            self.entries.append((path, font, ttffont.load(path)))
-        if not self.entries:
+    def __init__(self, primary: str, size: int, ImageFont,
+                 chars: set[str] | None = None):
+        try:
+            font = ImageFont.truetype(primary, size)
+        except OSError:
             raise TDError(
                 "font-missing",
                 f"{primary!r} could not be loaded as a font",
                 hint="install a monospace font (apt-get install "
                      "fonts-dejavu-core) or point TERM_USE_FONT at a real one")
+        primary_face = ttffont.load(primary)
+        self.entries = [(primary, font, primary_face)]
+        # What the primary cannot draw decides which fallbacks are worth opening.
+        # An unreadable cmap (covers() -> None) is unknown, not a gap: fall back
+        # to the unranked list rather than trusting a parser limitation.
+        need: set[str] | None = set()
+        if chars is not None:
+            probes = {primary_face.covers(ch) for ch in chars}
+            need = None if probes == {None} else {
+                ch for ch in chars if primary_face.covers(ch) is False}
+        for path in [primary, *fallback_fonts(primary, need)]:
+            if path == primary:
+                continue
+            try:
+                self.entries.append((path, ImageFont.truetype(path, size),
+                                     ttffont.load(path)))
+            except OSError:
+                continue                      # unreadable face: skip it honestly
         self.primary = self.entries[0][0]
         self.face = self.entries[0][2]
         self.charw = max(1, round(self.entries[0][1].getlength("/")))
@@ -304,7 +370,14 @@ def render(grid: list, out_path: str, cols: int | None = None,
                  "TERM_USE_FONT=/path/to/Mono.ttf / TERM_USE_FONT_DIRS=/dir "
                  "with one in it; the text channels need no font")
     default_fg, default_bg = theme()
-    chain = _Chain(font_path, font_size, ImageFont)
+    # What this screen needs decides which fallback faces are worth opening: an
+    # ASCII screen asks for none, a CJK panel asks for the one face on this
+    # machine that covers it. Codepoints glyphvec paints itself are no question
+    # for a font, so they must not send the search hunting a braille face.
+    need = {c["char"] for row in grid for c in row
+            if c and not c.get("pad") and c.get("char") not in (None, " ")
+            and not glyphvec.drawn(ord(c["char"]))}
+    chain = _Chain(font_path, font_size, ImageFont, need)
     charw, lineh = chain.charw, chain.lineh
     height = int(rows) if rows and int(rows) > 0 else max(len(grid), 1)
     width = int(cols) if cols and int(cols) > 0 else max(

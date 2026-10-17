@@ -189,6 +189,120 @@ def test_bad_override_raises_structured_error():
             os.environ["TERM_USE_FONT"] = old
 
 
+class _StubFace:
+    """A cmap answer by filename, so the *ranking* is tested without a font."""
+
+    def __init__(self, has):
+        self.has = set(has)
+
+    def covers(self, ch):
+        return ch in self.has
+
+
+def _with_font_dir(tmpdir, coverage):
+    """Point the probe at one directory of empty font files and answer coverage
+    from `coverage` instead of parsing them (the ranking is what is under test)."""
+    old_dirs = os.environ.get("TERM_USE_FONT_DIRS")
+    real_load = tdscreenshot.ttffont.load
+    os.environ["TERM_USE_FONT_DIRS"] = tmpdir
+    tdscreenshot.ttffont.load = lambda p: _StubFace(coverage.get(Path(p).name, ""))
+
+    def restore():
+        tdscreenshot.ttffont.load = real_load
+        if old_dirs is None:
+            os.environ.pop("TERM_USE_FONT_DIRS", None)
+        else:
+            os.environ["TERM_USE_FONT_DIRS"] = old_dirs
+    return restore
+
+
+def test_fallback_is_chosen_by_coverage_not_by_filename():
+    """The measured failure of issue #3: seven `unifont*` files matched the
+    strongest hint and filled all four slots, so `wqy-zenhei.ttc` — 34th in the
+    listing — was never opened and CJK came out as an 8x16 bitmap or tofu."""
+    with tempfile.TemporaryDirectory() as tmp:
+        names = ["unifont-15.1.05.otf", "unifont_upper-15.1.05.otf",
+                 "unifont_jp-15.1.05.otf", "DejaVuSansMono.ttf",
+                 "wqy-zenhei.ttc"]
+        for n in names:
+            (Path(tmp) / n).write_bytes(b"")
+        restore = _with_font_dir(tmp, {"wqy-zenhei.ttc": "你好",
+                                       "unifont-15.1.05.otf": "⣿"})
+        try:
+            chosen = tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), {"你", "好"})
+            assert [os.path.basename(c) for c in chosen] == ["wqy-zenhei.ttc"], chosen
+        finally:
+            restore()
+
+
+def test_one_family_occupies_one_slot():
+    """`unifont`, `unifont_upper`, `unifont_jp` are three coverages; seven cuts of
+    the same family are one. Versions and style words must not multiply it, and a
+    Bold cut must never win — the grid already carries bold as an attribute."""
+    with tempfile.TemporaryDirectory() as tmp:
+        names = ["NotoSansCJK-Regular.ttc", "NotoSansCJK-Bold.ttc",
+                 "NotoSansCJKjp-Regular.ttc", "DejaVuSansMono.ttf"]
+        for n in names:
+            (Path(tmp) / n).write_bytes(b"")
+        # The Noto CJK family covers nothing here, so the search must move on to
+        # the next family instead of spending its budget on siblings of the first.
+        restore = _with_font_dir(tmp, {"NotoSansCJKjp-Regular.ttc": "你"})
+        try:
+            chosen = [os.path.basename(c) for c in tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), {"你"})]
+            assert chosen == ["NotoSansCJKjp-Regular.ttc"], chosen
+            assert not any("Bold" in c for c in chosen), chosen
+        finally:
+            restore()
+
+
+def test_a_screen_that_needs_nothing_opens_nothing():
+    """Every fallback face costs a cmap parse and a Pillow load. An ASCII screen
+    has no gap to fill, so the chain stays the primary alone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "wqy-zenhei.ttc").write_bytes(b"")
+        (Path(tmp) / "DejaVuSansMono.ttf").write_bytes(b"")
+        restore = _with_font_dir(tmp, {})
+        try:
+            assert tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), set()) == []
+        finally:
+            restore()
+
+
+def test_no_coverage_question_keeps_the_symbol_pack_order():
+    """`need=None` is the old unranked call: symbol packs and Unifont first,
+    because that is what they exist for."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in ("wqy-zenhei.ttc", "unifont-15.1.05.otf", "DejaVuSansMono.ttf"):
+            (Path(tmp) / n).write_bytes(b"")
+        restore = _with_font_dir(tmp, {})
+        try:
+            chosen = [os.path.basename(c) for c in tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), None)]
+            assert chosen[0] == "unifont-15.1.05.otf", chosen
+        finally:
+            restore()
+
+
+def test_droid_fallback_is_a_candidate_at_all():
+    """Issue #3 came from an Android device whose only CJK face was
+    `DroidSansFallback.ttf` — a name the hint list did not contain, so the one
+    font that could have drawn the screen was filtered out before ranking."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in ("DroidSansMono.ttf", "DroidSansFallback.ttf",
+                  "DejaVuSansMono.ttf"):
+            (Path(tmp) / n).write_bytes(b"")
+        restore = _with_font_dir(tmp, {"DroidSansFallback.ttf": "你"})
+        try:
+            chosen = tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DroidSansMono.ttf"), {"你"})
+            assert [os.path.basename(c) for c in chosen] == ["DroidSansFallback.ttf"], chosen
+        finally:
+            restore()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

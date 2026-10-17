@@ -1,13 +1,14 @@
 """Symbol ranges drawn as geometry, not glyphs.
 
-Modern terminal UIs paint most of their chrome out of four Unicode ranges that
-a *single installed font* will not reliably cover — measured on this box,
+Modern terminal UIs paint most of their chrome out of a handful of Unicode ranges
+that a *single installed font* will not reliably cover — measured on this box,
 DejaVu Sans Mono has box drawing and blocks but **no braille and no Powerline
-PUA**, and nothing on a typical server has the PUA at all. The reference
-implementations (asciinema's `agg`, kitty, foot) solve this the same way: they
-vectorize these ranges instead of hoping for a font. Same here, so a starship
-prompt segment, a braille spinner or a bordered panel renders on a machine
-with no symbols font installed.
+PUA**, and nothing on a typical server has the PUA at all; on the device that
+reported issue #3, Droid Sans Mono had no arrows either. The reference
+implementations (asciinema's `agg`, kitty, foot) solve the same problem the same
+way: they vectorize these ranges instead of hoping for a font. Same here, so a
+starship prompt segment, a braille spinner, a `←` in a menu or a bordered panel
+renders on a machine with no symbols font installed.
 
 Each `draw_*` returns True when it painted the cell; the renderer falls back to
 the font chain when it returns False.
@@ -41,16 +42,64 @@ _DOUBLE_BOX = {0x2550: (0, 0, 1, 1), 0x2551: (1, 1, 0, 0), 0x2554: (0, 1, 0, 1),
 # (column, row) on a 2x4 grid.
 _BRAILLE_DOTS = ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3))
 
+# Arrows (U+2190–U+2199) as shaft directions. TUI menus, rewind lines and
+# progress rails are built out of these, and the reporter's own device font
+# (Droid Sans Mono) has no coverage for them: the pane drew `←` fine while the
+# rendered picture showed tofu. One direction per arrow, two for the doubles.
+_ARROW_VECS = {
+    0x2190: ((-1, 0),), 0x2191: ((0, -1),), 0x2192: ((1, 0),), 0x2193: ((0, 1),),
+    0x2194: ((-1, 0), (1, 0)), 0x2195: ((0, -1), (0, 1)),
+    0x2196: ((-1, -1),), 0x2197: ((1, -1),), 0x2198: ((1, 1),), 0x2199: ((-1, 1),),
+}
+
 
 def _blend(fg, bg, frac: float):
     return tuple(int(round(b + (f - b) * frac)) for f, b in zip(fg, bg))
 
 
+# Every codepoint `draw_cell` paints on its own, so the renderer knows which
+# glyphs need no font and must not send it hunting a fallback face for them.
+VECTORIZED = (frozenset(_ARROW_VECS) | frozenset(_QUADRANTS) | frozenset(_BOX)
+              | frozenset(_HEAVY_BOX) | frozenset(_DOUBLE_BOX)
+              | frozenset(range(0x2580, 0x2596)) | {0x254C, 0x254D}
+              | frozenset(range(0xE0B0, 0xE0B4))
+              | frozenset(range(0x2800, 0x2900)))
+
+
+def drawn(cp: int) -> bool:
+    """True for a codepoint painted geometrically — the font is never consulted."""
+    return cp in VECTORIZED
+
+
+def _draw_arrow(cp: int, x0: int, y0: int, w: int, h: int, fg, draw) -> bool:
+    """Shaft plus barbs for one arrow codepoint, from the cell centre out."""
+    vecs = _ARROW_VECS.get(cp)
+    if not vecs:
+        return False
+    cx, cy = x0 + (w - 1) / 2, y0 + (h - 1) / 2
+    t = max(1, min(w, h) // 8)
+    barb = max(2, min(w // 4, h // 4))
+    for dx, dy in vecs:
+        tipx, tipy = cx + dx * (w // 2 - 1), cy + dy * (h // 2 - 1)
+        # A double arrow (↔ ↕) draws two half-shafts from the centre; a single
+        # one runs the shaft all the way to the opposite edge.
+        tailx, taily = (cx, cy) if len(vecs) > 1 else (
+            cx - dx * (w // 2 - 1), cy - dy * (h // 2 - 1))
+        draw.line([tailx, taily, tipx, tipy], fill=fg, width=t)
+        px, py = -dy, dx
+        for s in (1, -1):
+            draw.line([tipx, tipy,
+                       tipx - dx * barb + s * px * barb,
+                       tipy - dy * barb + s * py * barb], fill=fg, width=t)
+    return True
+
+
 def draw_cell(ch: str, x0: int, y0: int, w: int, h: int, fg, bg, draw) -> bool:
     """Paint one symbol cell geometrically. False = the font should try."""
     cp = ord(ch)
-    if not 0x2500 <= cp <= 0x259F and not 0xE0B0 <= cp <= 0xE0B3 \
-            and not 0x2800 <= cp <= 0x28FF:
+    if cp in _ARROW_VECS:
+        return _draw_arrow(cp, x0, y0, w, h, fg, draw)
+    if cp not in VECTORIZED:
         return False
 
     # --- blocks ---
