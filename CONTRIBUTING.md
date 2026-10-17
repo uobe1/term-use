@@ -90,23 +90,34 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   `last_send_offset` is a byte offset into `raw.log`, never a timestamp.
 - **A completion is authorized, not merely positioned**: `send` reads its offset from
   the recording's current size while the recorder lags the pane, so the *previous*
-  command's `C` and `D` can both land after it. `CmdDone` accepts a `D` only when the
-  `C` that opened it is also inside the send's window, and tmux 3.8's native answer is
-  rejected while `pane_command_start_time <= baseline` even if `end_time` moved. Position
-  alone is not ownership — a met `fact` for the command before yours is the worst thing
-  this tool can do.
+  command's `C` and `D` can both land after it. Position is necessary and not
+  sufficient: `CmdDone` also requires a barrier the *same send* caused — either
+  `send` measured the recorder drained (`last_send_settled`, so nothing was lagging),
+  or the echo of the text it injected sits between the offset and the authorizing `C`
+  (tmux serializes a pane's stream, so the previous command's bytes are ordered
+  before our echo no matter when the recorder delivered them). Neither is provable →
+  the marker is reported `degraded: unattributed-marker`, never as a fact. On tmux
+  3.8+ the native answer is checked against `pane_command_start_time > baseline`
+  first, because `running` flips 1→0 with the *old* start time when a busy shell
+  finishes. Position alone is not ownership — a met `fact` for the command before
+  yours is the worst thing this tool can do.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility
 
 tmux is the only hard dependency and the tool leans on its behavior details, so the
-supported line is stated, not implied. **Recommended: 3.8+** (native command status,
-which is what makes completion facts survive ssh/remote shells and prompt frameworks
-that rewrite `PROMPT_COMMAND`). Minimum: 3.2a, on a self-scanned fallback.
+supported line is stated, not implied. **Recommended and the line new work is
+written against: 3.8+** (native command status, which is what makes completion facts
+survive ssh/remote shells and prompt frameworks that rewrite `PROMPT_COMMAND`).
+Minimum: 3.2a, on a self-scanned fallback — the alpha lines move toward 3.8, so a
+capability that only 3.8 can prove is allowed to *degrade* there rather than being
+emulated on ≤3.7c. Do not add a 3.7c-shaped workaround where a 3.8 fact exists, and
+do not let a test's native-channel assertions sit behind a version gate that never
+runs on the dev box: run the suite against both.
 
 | tmux | holds |
 |---|---|
-| 3.2a – 3.7c | everything works via term-use's own `raw.log` scan. The `pane_command_*` group does **not** exist (≤3.7c parses OSC 133 `A`/`C` only and discards `D;<code>`) — and tmux expands *any* unknown format to empty, so `tmuxio.meta()` drops the group when `pane_command_running` comes back empty. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
+| 3.2a – 3.7c | the whole feature set runs on term-use's own `raw.log` scan, which is a fallback and not an equal: it can only prove a completion if the recorder had drained or the injected text came back as echo. The `pane_command_*` group does **not** exist (≤3.7c parses OSC 133 `A`/`C` only and discards `D;<code>`) — and tmux expands *any* unknown format to empty, so `tmuxio.meta()` drops the group when `pane_command_running` comes back empty. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
 | 3.7 / 3.7a / 3.7b / 3.7c | no drift here: `input_osc_133()` is byte-identical, `capture-pane -F` flags (`D H O P W X`) unchanged. `wait-for` has no `-t` and cannot list waiters |
 | 3.8 | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`; fixes the `wait-for` client leak (#5614). term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
 

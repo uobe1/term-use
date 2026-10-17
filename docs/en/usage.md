@@ -229,7 +229,9 @@ stall signals, the native command status on 3.8+), while the text/grid flags (`-
 the screen. Asking for both is refused with `invalid-arguments` rather than silently
 returning one — a flag that was dropped without saying so is the kind of silence this tool
 does not sell. Same rule in `wait`: `--scrollback` widens only the `--until` search, and
-`--expect-code` needs a command that can answer a code (the `true` probe cannot).
+`--expect-code` needs an oracle that can read a code: the `true` probe cannot (it runs
+`true`), and neither can the quiet sampling `--done` falls back to when the target has no
+completion markers. Both refuse with `invalid-arguments` instead of ignoring the number.
 
 `screen --find` returns every literal match with **1-based, click-ready**
 coordinates — the locate-then-click flow is a single hop:
@@ -321,8 +323,15 @@ server owns PTYs/sessions. All state lives on disk under
   `r` resize, `m` sync points). The ground truth for protocol-level bytes.
 - **`state.json`** — locator + recorder state, written atomically (tmp + rename).
   `last_send_offset` is a **byte offset** into `raw.log`, so `--cmd-done` only
-  accepts markers emitted after your last send — a typed echo can never fake
-  completion.
+  accepts markers emitted after your last send. Position is necessary and not
+  enough: the recorder lags the pane, so a busy shell can deliver the *previous*
+  command's `C` and `D` inside your window. term-use calls a completion yours only
+  when it can bind it — the echo of the line you typed sits before the `C` that
+  opened it, or (a keys-only send) the recording was quiet when `send` measured it.
+  When neither can be proved the wait keeps failing and the evidence says
+  `"degraded": "unattributed-marker"`: type the command with `--type`, or use
+  `--shell-ready`. On tmux 3.8+ the native channel answers this by start time and
+  needs neither. `last_send_settled` is that per-send drain answer.
 
 Every mechanism claim in this guide is exercised by the E2E suite
 (`tests/e2e/*.sh`), which drives real tmux and real programs through the CLI
@@ -340,9 +349,13 @@ only — nothing is mocked.
   put the marker you wait for inside your sent text; split it at runtime
   (`print('OUT_' + '42')`). Leftover echoes from earlier experiments pollute
   later waits — use a fresh session for sensitive experiments.
-- **Spinners defeat quiet** — `--quiet-ms` also gates on the raw stream's
-  last-write time, but pick 2-3x the frame period and anchor with `--until`
-  when possible. A program that *starts* spinning after your input can
+- **Spinners defeat quiet — cell-painting ones only.** `--quiet-ms` gates on the
+  last write that can reach the grid, so a program animating *just its window
+  title* (`ESC ]0;⠏ … BEL` every 100 ms over a byte-identical screen) settles
+  instead of burning your timeout; the verdict says it settled on pixels with
+  `program_running`. A spinner that repaints cells still never settles: pick
+  2-3x the frame period and anchor with `--until` when possible. A program that
+  *starts* spinning after your input can
   false-settle a large quiet value — wait for the stream to start first.
   **Menus are quiet-hostile**: inside modal pickers use `sleep 0.5-1` +
   `screen`, not `--quiet-ms`. Menu arrow keys also debounce: `send --key Up

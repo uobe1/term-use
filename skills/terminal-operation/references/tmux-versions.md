@@ -31,8 +31,15 @@ chosen over an alternative. Tell the two apart with `tmux -V`, not with the verd
 
 - The timestamps have one-second granularity, so a completion is proved by `end_time`
   advancing past the baseline stamped at send time, by a changed exit code, or by having
-  seen `running=1`. When none of those holds, term-use falls back to the byte scan — which
-  is sub-second and byte-precise.
+  seen `running=1` — and a report whose `pane_command_start_time` is the baseline
+  command's is refused, because that is the *previous* command finishing while your line
+  sat in the tty buffer. When none of those holds, term-use falls back to the byte scan,
+  which is sub-second but must bind the marker to your send (see `channels.md`,
+  Attribution).
+- **This is why 3.8+ is the version to run on.** Below it, a keys-only send into a
+  recorder that cannot drain has no honest answer left, and the wait degrades instead of
+  claiming a code. The native channel is not one more source among equals: it is the one
+  that proves *which* command a completion belongs to.
 - **`pane_command_running: true` does not mean "your command is still going."** `PS0` emits
   `C` and `PROMPT_COMMAND` emits `D`, so a framework that swallowed `D` sticks the flag at
   1 forever — and a shell blocked on `read` or a password prompt leaves exactly the same

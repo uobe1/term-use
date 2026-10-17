@@ -56,23 +56,44 @@ Defaults: `--timeout 10`, `--interval 0.1`. `--until` is Python `re` with DOTALL
 | Oracle | Confidence | Proves |
 |---|---|---|
 | `--done` | the chosen oracle's | the last thing you sent finished; picks `osc133` → `shell-ready-probe` → `pane-exit` → `quiet-sampling` and reports it in `via`/`channel` |
-| `--cmd-done` | fact | an OSC 133 `D` marker arrived after your last send (also reads VSCode's OSC 633) |
+| `--cmd-done` | fact | an OSC 133 `D` marker arrived after your last send (also reads VSCode's OSC 633) **and is bound to that send** — see Attribution below |
 | `--shell-ready` | fact | the shell answers a `true` probe — i.e. it holds the terminal again |
 | `--exit` | fact | the pane died (needs `remain-on-exit`); signal name normalized |
 | `--until 're'` | inference | text is on the screen. `echo_suspect: true` + downgrade to `heuristic` when it is your own typed text |
 | `--since-send` | — | scopes `--until` to output produced after the last send, so stale text cannot satisfy it |
-| `--quiet-ms N` | heuristic | the display stopped changing (dual gate: raw-stream last-write + screen snapshot stability, unclosed CSI 2026 or an alt-screen handover (`?1049h`) forces instability). While a program
+| `--quiet-ms N` | heuristic | the display stopped changing (dual gate: last *cell-reaching* write + screen
+snapshot stability; unclosed CSI 2026 or an alt-screen handover (`?1049h`) forces
+instability). Bytes that paint nothing — window-title frames (`ESC ]0;…`), OSC 133
+markers, clipboard and notification reports — do **not** hold the gate open, so a
+program that animates only its title bar settles while it runs. While a program
 holds the pane the verdict carries `program_running: true`, plus `silent_unproven: true`
-when nothing at all has been written since your send: **a settle is about pixels, not
-completion** |
+when nothing that paints the screen has arrived since your send: **a settle is about
+pixels, not completion** |
 | `--scrollback N` | — | widens the `--until` search into history only; refused with other oracles |
+
+**Attribution — why a marker inside your window is not yet an answer.** `send` draws the
+window at the recording's current size, and the recorder lags the pane: inject while the
+shell is busy and the *previous* command's `C` and `D` both land inside it. term-use
+accepts such a marker only when it can bind it to the send that caused it — the echo of
+the text you typed sits between the offset and that `C` (tmux orders a pane's stream, so
+bytes from before your injection cannot come after your echo), or, for a keys-only send,
+the recording was quiet when `send` measured it. When neither holds the wait keeps
+failing and the timeout evidence carries `"degraded": "unattributed-marker"`. What to do:
+type the command with `--type` (a typed line carries its own binding) instead of sending
+bare keys, use `--shell-ready` to ask the shell directly, or run the pane on tmux 3.8+,
+where the native channel binds a completion to a *start time* and needs no binding at all.
 
 Verdict shape: `{verdict, confidence, conditions[], evidence{screen,…}, context, via,
 channel, advice?, exit_code?, note?}`. Composite verdicts take the weakest member's
-confidence. A `note` on a met `--done` means your line was compound (`;`, `&&`, `|`, `&`):
-the one `exit_code` describes only part of it, and the note quotes **which command** the
-number came from (your own last segment, echoed back). A `;` inside quotes is data and
-never triggers it.
+confidence, while each entry in `conditions[]` reports what *it* answered — a timed-out
+AND shows the child that did match (with its `exit_code`) beside the one that never did.
+A `note` on a met `--done`/`--cmd-done` means your line was compound (`;`, `&&`, `||`,
+`|`, `&`): the one `exit_code` describes only part of it, and the note quotes **which
+command** the number came from (your own last segment, echoed back) and what a zero means
+for that operator — `&&` zero = every stage passed, `||` zero = an earlier stage already
+succeeded and the last one may never have run. A `;` inside quotes is data and never
+triggers it. `--expect-code` is refused, not ignored, when the oracle `--done` fell back to
+has no code to read (quiet sampling) or is the `true` probe.
 Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
 `"degraded": "unmanaged"`, capped at `heuristic`; `--cmd-done`/`--shell-ready`/`--since-send`/
 `out` refuse with `unmanaged-pane`; `--exit` works and reports `"degraded":
@@ -139,6 +160,13 @@ Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
   was never palette. Draws the pane's real geometry (never cropped to content), outlines
   the cursor, reports `glyphs.missing`/`missing_samples` instead of emitting silent tofu,
   and reports `font`/`font_source` (`bundled` when only the shipped face could answer).
+  `glyphs` says how much of the picture is trustworthy: `vector` = box-drawing, blocks,
+  braille, powerline and arrows drawn as geometry (no font needed); `primary` = the chosen
+  mono; `fallback` = another face opened *because this screen lacked coverage*, listed in
+  `fallback_fonts`, ranked by the codepoints actually missing (one face per family, so a
+  directory of seven `unifont*` cuts cannot crowd out the CJK face); `missing` = reported
+  boxes, not silent ones. `TERM_USE_FG`/`TERM_USE_BG` set the defaults,
+  `TERM_USE_FONT`/`TERM_USE_FONT_DIRS` the search.
   `TERM_USE_DISABLE_IMAGE=1` denies the image channel (`screenshot` and
   `replay --format png`) with `pillow-missing`.
 - `clear -n N [--history-only]` — reclaims the screen and scrollback before the next

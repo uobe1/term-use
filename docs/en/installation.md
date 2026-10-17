@@ -43,9 +43,9 @@ through tmux's own interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
 
 | Your tmux | What that means here |
 |---|---|
-| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux, so a stopped recorder or a prompt framework that rewrites `PROMPT_COMMAND` costs the fact channel |
+| 3.2a – 3.7c | works on a fallback. `--cmd-done`/`--shell-ready` take their facts from term-use's own recording instead of from tmux, so a stopped recorder or a prompt framework that rewrites `PROMPT_COMMAND` costs the fact channel — and a marker in the recording has to be *attributed* to your send (by a drained recorder, or by the echo of what you typed) before it is called `fact` |
 | 3.7 / 3.7a / 3.7b / 3.7c | no difference that matters — the OSC 133 handling and `capture-pane -F` flags are identical across the patch line |
-| 3.8 or newer | **recommended.** tmux parses the markers itself, so `wait --done` has a second fact source (`via: tmux-command-status`) that survives ssh, a clobbered `PROMPT_COMMAND` and a dead recorder, and `screen --meta` answers "is a command running?" as a fact (`pane_command_running`). Everything else is the same |
+| 3.8 or newer | **recommended, and where the tool is developed.** tmux parses the markers itself, so `wait --done` has a second fact source (`via: tmux-command-status`) that binds a completion to a *start time* rather than to a byte position, survives ssh, a clobbered `PROMPT_COMMAND` and a dead recorder, and `screen --meta` answers "is a command running?" as a fact (`pane_command_running`). Everything else is the same |
 | older than 3.2 | unsupported: `capture-pane -e` attribute fidelity and `send-keys -H` byte handling are not reliable there |
 
 term-use has **zero Python dependencies**. tmux is an external binary, not a
@@ -124,12 +124,13 @@ uv tool install git+https://github.com/uobe1/term-use.git
 uv tool install git+https://github.com/uobe1/term-use.git --with pillow
 ```
 
-The 2.0 line is developed on its own alpha branches and `main` still carries the older
-`term-debug` layout, so if you need 2.0 before it merges, install from a clone checked
-out at the branch you want — do not bake a ref into the command above:
+The 2.0 line ships from `main`. New work lands on the alpha branches (`v2.0aN`)
+and is merged into `main` once verified, so the commands above install the current
+release — do not bake a ref into them. Clone a branch only when you need something
+not yet merged:
 
 ```bash
-git clone https://github.com/uobe1/term-use.git && cd term-use
+git clone -b v2.0a6 https://github.com/uobe1/term-use.git && cd term-use
 uv tool install . --with pillow        # or `uv tool install -e .` to hack on it
 ```
 
@@ -264,12 +265,27 @@ the package now lives in `src/termuse/` and runs as `python -m termuse`. If your
 scripts still call `python3 term_debug.py`, replace the call with `term-use`
 (installed) or `PYTHONPATH=<repo>/src python3 -m termuse` (source tree).
 
-Session data has also moved: it used to live under
-`$XDG_CACHE_HOME/term-use/` (i.e. `~/.cache/term-use/`) and now lives under
-`$XDG_STATE_HOME/term-use/` (i.e. `~/.local/state/term-use/`) — per the XDG
-Base Directory spec, recordings and locator state are *logs / current state*, not
-discardable cache. Existing recordings are not migrated or read from the old
-location; copy the directory over manually if you need them.
+Session data has moved too — twice, and it changed name along the way. Nothing is
+read from or migrated out of the old locations, so a session started before the
+rename looks like an empty directory:
+
+| when the session was started | where its recordings are |
+|---|---|
+| cache era (before the `src/` layout refactor) | `$XDG_CACHE_HOME/term-debug/` → `~/.cache/term-debug/` |
+| 2.0.0a1 – 2.0.0a2 | `$XDG_STATE_HOME/term-debug/` → `~/.local/state/term-debug/` |
+| 2.0.0a3 and later | `$XDG_STATE_HOME/term-use/` → `~/.local/state/term-use/` |
+
+```bash
+mkdir -p ~/.local/state/term-use
+cp -a ~/.local/state/term-debug/. ~/.local/state/term-use/   # a1–a2 recordings
+cp -a ~/.cache/term-debug/. ~/.local/state/term-use/         # cache-era recordings
+```
+
+That restores the evidence (`raw.log`, `state.json`, replayable frames). It does not
+hand back a live pane: the tmux session those recordings described is gone, so
+`wait`/`send` against a copied name will not resume. Per the XDG Base Directory
+spec, recordings and locator state are *logs / current state*, not discardable
+cache — which is why they left `~/.cache` in the first place.
 
 ## Updating
 
@@ -335,8 +351,24 @@ explicit.
 
 ### `{"error":{"code":"no-shell-integration",...}}` from `--cmd-done`
 
-Normal for non-bash sessions: the OSC 133 markers are injected into bash only. Wait
-with `--until` anchored on the program's own output marker instead.
+The pane's shell emits no OSC 133 command markers. Integration is injected for
+**both bash and zsh** (`start` builds a `ZDOTDIR` of its own that sources your files
+first), **fish >= 4.0** emits the markers by itself, and a session carrying someone
+else's integration (VSCode's OSC 633, WezTerm's 133) is believed from the stream
+rather than refused for not being a shell we configured. So this error means one of:
+
+- the pane runs a shell with no pre-exec hook — plain `sh`/`dash`/`csh`. Wait on the
+  program's own output with `--until 'regex' --since-send`, or on pane death with
+  `--exit` when the program *is* the pane;
+- a prompt framework (starship, powerline) rewrote the injected hooks after startup.
+  `--until` still works, and on tmux 3.8+ term-use also asks tmux's own command
+  status, which keeps answering when `PROMPT_COMMAND` is gone;
+- the shell had not painted its first prompt while the gate looked. It waits up to
+  `min(--timeout, 5s)` for the stream to prove itself, so a longer `--timeout` is
+  the fix, not a different shell.
+
+`--cmd zsh` and `--cmd fish` are supported routes to a fact-level wait; only
+`sh`/`dash` have no completion marker to wait for.
 
 ### `{"error":{"code":"shell-not-ready",...}}` from `--shell-ready`
 
