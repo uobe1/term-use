@@ -53,6 +53,18 @@ def test_trim_does_not_split_a_multibyte_character_into_an_error():
 def test_redrawn_detection_names_tui_style_output():
     assert replay.looks_redrawn("\x1b[?1049h\x1b[H hello") is True
     assert replay.looks_redrawn("just some lines\nof output\n") is False
+    # Absolute positioning and cursor-up are redraw; a menu's `2J`+`H` is redraw.
+    assert replay.looks_redrawn("\x1b[2J\x1b[HMENU_READY") is True
+    assert replay.looks_redrawn("\x1b[12;1HCLICKED:3,4\x1b[K") is True
+    assert replay.looks_redrawn("downloading \x1b[1Aoverwritten line") is True
+    # What used to fire on it, and misled both arms of the ab_write A/B down a
+    # `replay` detour: colored traceback text (SGR bold) and bash's own bracketed
+    # paste markers / prompt repaint are not a program repositioning its output.
+    assert replay.looks_redrawn(
+        '\x1b[?2004hTraceback:\r\n  File \x1b[35m"x.py"\x1b[0m, '
+        'line \x1b[32m3\x1b[0m\r\n\x1b[?2004l') is False
+    assert replay.looks_redrawn("\x1b[1;35mValueError\x1b[0m: bad") is False
+    assert replay.looks_redrawn("\x1b[H\x1b[Jroot@host:~$ ") is False
 
 
 

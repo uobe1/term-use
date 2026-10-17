@@ -76,12 +76,22 @@ def cmd_sessions(args) -> int:
                              "windows": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
                              "attached": parts[2:] and parts[2] == "1"})
     else:
-        # "no server running" is an honest empty list; anything else tmux
-        # complains about must surface, not be reported as an empty room.
+        # "no server running" is an honest empty list; so is tmux's other answer
+        # for a private socket that has never been started (`error connecting to
+        # … (No such file or directory)`) — the recommended workflow says "use a
+        # private --socket", and both arms of the ab_write A/B read that rc=1 as
+        # an environment fault before their first `start`. Anything else tmux
+        # complains about must still surface, not be reported as an empty room.
         msg = (res.stderr or "").strip()
         low = msg.lower()
         if "no server running" in low or "no sessions" in low:
             rows = []
+        elif "no such file or directory" in low and "error connecting" in low:
+            rows = []
+            print(f"note: no tmux server on socket {args.socket!r} yet — that is "
+                  f"an empty list, not a failure; start one with "
+                  f"`term-use start -n NAME --socket {args.socket}`",
+                  file=sys.stderr)
         else:
             code, hint = tmuxio.classify(res)
             raise TDError(code, msg or f"tmux failed (exit {res.returncode})",
@@ -621,6 +631,20 @@ def cmd_wait(args) -> int:
             }
             answered = next((getattr(c, "via", None) for c in conditions
                              if getattr(c, "via", None)), None)
+            if any(getattr(c, "busy", False) for c in conditions):
+                # The one misreading this tool can prevent: a quiet settle is a
+                # statement about pixels, and an agent that hears "done" will
+                # write a report about a program that is still running.
+                verdict["note"] = (
+                    "the pane stopped *repainting*, which is not the same as "
+                    "finishing: a program still holds the foreground "
+                    "(screen --meta's pane_current_command says which). For "
+                    "\"did it finish\", use wait --done")
+            if any(getattr(c, "silent_unproven", False) for c in conditions):
+                verdict["note"] = (verdict.get("note", "") +
+                                   " Nothing has been written since your send, "
+                                   "so this settle rests on the screen having "
+                                   "been still, not on any output.").strip()
             if answered:
                 # Name the channel that actually answered: on tmux 3.8 the
                 # native command status often beats our own byte scan to a

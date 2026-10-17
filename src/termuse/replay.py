@@ -22,15 +22,24 @@ bytes to the program's *stdin*, so something inside has to echo them back out
 as real output, and `-echo` keeps the line discipline from doubling them.
 """
 import os
+import re
 import time
 
 from termuse import records, screen, tmuxio
 from termuse.errors import TDError
 
-# Sequences that mean "this program redraws the screen" rather than "it prints
-# lines": alt-screen, explicit cursor addressing, or erase-in-display.
-_REDRAW_MARKERS = ("\x1b[?1049h", "\x1b[?47h", "\x1b[?1047h", "\x1b[H",
-                   "\x1b[2J", "\x1b[1;")
+
+# What makes linear text a *lie* about the frame: a program that switches to the
+# alternate screen, clears, or moves the cursor to repaint cells. Deliberately
+# narrow — an earlier substring list matched `\x1b[1;` (bold SGR: every colored
+# Python traceback) and a bare `\x1b[H` (bash repainting its own prompt on C-l),
+# and both arms of the ab_write A/B were sent down a `replay` detour by that
+# false positive. Bracketed paste (`?2004`) and color codes are not redraw.
+_REDRAW_RE = re.compile(
+    r"\x1b\[\?(?:47|1047|1049)h"      # enter alternate screen
+    r"|\x1b\[2J"                       # erase whole screen
+    r"|\x1b\[\d+;\d+H"                 # absolute cursor position
+    r"|\x1b\[\d+A")                    # cursor up (in-place repaint)
 
 
 def strip_escapes(text: str) -> str:
@@ -39,7 +48,7 @@ def strip_escapes(text: str) -> str:
 
 
 def looks_redrawn(raw: str) -> bool:
-    return any(m in raw for m in _REDRAW_MARKERS)
+    return bool(_REDRAW_RE.search(raw))
 
 
 def linear(raw: str) -> str:

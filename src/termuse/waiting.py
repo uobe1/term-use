@@ -525,6 +525,13 @@ class QuietCondition(Condition):
         self._last_o_ts = None  # elapsed of the newest o-event
         self._scan_offset = 0
         self._tail = ""
+        self.silent_unproven = False
+        self.busy = False
+        # Did the pane write anything at all after the last send? Set from the
+        # first scan below; without it a silent program reads as "settled".
+        self._send_offset = 0
+        self._saw_output = False
+        self.state: dict | None = None
         if not managed:
             # Unmanaged pane: no raw.log, so gate 1 (stream last-write) cannot
             # run. Degrade to screen-stability sampling only — never touch
@@ -535,6 +542,12 @@ class QuietCondition(Condition):
             return
         w = records.V2Writer(session)
         self.t0 = w.t0
+        try:
+            self.state = records.read_state(session)
+        except TDError:
+            self.state = None      # no state.json: nothing was "sent" to scope by
+        self._send_offset = int((self.state or {}).get("last_send_offset", 0) or 0)
+        self._saw_output = self._send_offset == 0  # nothing sent: nothing to prove
         self._consume_stream()
 
     def _consume_stream(self) -> None:
@@ -546,9 +559,11 @@ class QuietCondition(Condition):
         if size <= self._scan_offset:
             return
         text = ""
-        for ts, code, data, _pos in records.events_since(self.session, self._scan_offset):
+        for ts, code, data, pos in records.events_since(self.session, self._scan_offset):
             if code == "o" and isinstance(data, str):
                 self._last_o_ts = ts
+                if pos >= self._send_offset:
+                    self._saw_output = True
                 text += data
         self._scan_offset = size
         buf = self._tail + text
@@ -581,12 +596,36 @@ class QuietCondition(Condition):
                 return False
         # Gate 2: screen snapshot stability across spaced samples.
         if self._last == sample:
+            # Settled means the DISPLAY stopped changing. Both arms of the
+            # ab_write A/B read the `met` as "the command finished" and were
+            # wrong twice, so the verdict now says which of the two it is:
+            # a program still holding the pane (or tmux 3.8 saying so) is
+            # reported alongside, and `--done` is named as the completion
+            # question. Refusing to settle here would break the legitimate
+            # use — waiting for nano or a TUI to stop repainting *while it
+            # runs* — so the fix is honesty in the output, not a refusal.
+            self.busy = self._program_busy(m)
+            self.silent_unproven = self.managed and not self._saw_output
             return True
         self._last = sample
         return False
 
+    def _program_busy(self, meta: dict | None) -> bool:
+        nat = native_state(meta)
+        if nat and nat["running"]:
+            return True
+        fg = str((meta or {}).get("pane_current_command") or "")
+        if not fg:
+            return False
+        return fg not in ("", _managed_shell(self.state))
+
     def to_json(self, met: bool) -> dict:
-        return {**super().to_json(met), "ms": self.ms}
+        out = {**super().to_json(met), "ms": self.ms}
+        if met and self.busy:
+            out["program_running"] = True
+        if met and self.silent_unproven:
+            out["silent_unproven"] = True
+        return out
 
 
 # Programs that host *another* terminal. Their shell's markers arrive as inert
