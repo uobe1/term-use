@@ -42,3 +42,8 @@ Documentation = "https://github.com/uobe1/term-use/tree/main/docs"
 [tool.setuptools]
 package-dir = { "" = "src" }
 packages = ["termuse"]
+
+# The bundled last-resort face and its licence text (package data, not a
+# dependency: 62 KB, so `screenshot` works on a machine with no fonts at all).
+[tool.setuptools.package-data]
+termuse = ["fonts/*.ttf", "fonts/*.txt"]

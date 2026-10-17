@@ -78,19 +78,21 @@ r = json.load(open('$TMP/f2.json'))
 assert r['font'] == 'PrefixMono.ttf', r['font']
 " || fail "prefix font tree"
 
-# an explicit font dir *is* the search list: pointing it at nothing must give a
-# structured font-missing (with the fix named), never a traceback or a silent lie
+# an explicit font dir replaces the *search list*, not the last resort: pointing
+# it at nothing must still render, and must say which face answered (silently
+# borrowing another font would be the lie; failing when a face is shipped is
+# worse than useless)
 mkdir -p "$TMP/emptyfonts"
-if TERM_USE_FONT_DIRS="$TMP/emptyfonts" $TD screenshot -n td21b -o "$TMP/f3.png" \
-     >/dev/null 2>"$TMP/fm.json"; then
-  fail "an empty explicit font dir must not silently succeed"
-fi
+TERM_USE_FONT_DIRS="$TMP/emptyfonts" $TD screenshot -n td21b -o "$TMP/f3.png" \
+  >"$TMP/f3.json" 2>"$TMP/f3.err" || fail "empty explicit dir must fall back, not fail"
 python3 -c "
 import json
-e = json.load(open('$TMP/fm.json'))['error']
-assert e['code'] == 'font-missing', e
-assert 'TERM_USE_FONT' in (e['hint'] or ''), e
-" || fail "empty font dir must give font-missing (see above)"
+r = json.load(open('$TMP/f3.json'))
+assert r['font_source'] == 'bundled', r
+assert 'DejaVuSansMono' in r['font'], r
+" || fail "bundled fallback reporting"
+grep -qi 'bundled\|fall' "$TMP/f3.err" \
+  || fail "the fallback must be stated on stderr too: $(cat "$TMP/f3.err")"
 
 $TD stop -n td21b >/dev/null
 echo "E2E-21 PASS"

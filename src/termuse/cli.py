@@ -662,6 +662,10 @@ def cmd_replay(args) -> int:
             raise TDError("pillow-missing",
                           "Pillow is required for the image channel",
                           hint="pkg install python-pillow (or: pip install Pillow)")
+        if info["font_source"] == "bundled" and os.environ.get("TERM_USE_FONT_DIRS"):
+            print("note: no monospace font was found in TERM_USE_FONT_DIRS, so the "
+                  "face bundled with term-use drew this picture — install a system "
+                  "font (or fix the dir) for the machine's own look", file=sys.stderr)
         ctx = tdbudget.image_context(info["path"], info["size"])
         print(json.dumps({"ok": True, "at": args.at, "format": "png", **info,
                           "replayed": True, "context": ctx}, ensure_ascii=False))
@@ -753,6 +757,10 @@ def cmd_screenshot(args) -> int:
         raise TDError("pillow-missing",
                       "Pillow is required for the image channel",
                       hint="pkg install python-pillow (or: pip install Pillow)")
+    if info["font_source"] == "bundled" and os.environ.get("TERM_USE_FONT_DIRS"):
+        print("note: no monospace font was found in TERM_USE_FONT_DIRS, so the "
+              "face bundled with term-use drew this picture — install a system "
+              "font (or fix the dir) for the machine's own look", file=sys.stderr)
     ctx = tdbudget.image_context(info["path"], info["size"])
     print(json.dumps({"ok": True, "format": args.format, **info,
                       "context": ctx}, ensure_ascii=False))

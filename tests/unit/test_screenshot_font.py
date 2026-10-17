@@ -131,6 +131,9 @@ def test_explicit_font_dirs_replaces_the_probe_list():
         os.environ["TERM_USE_FONT_DIRS"] = "/no/such/dir" + os.pathsep + "/also/nope"
         assert tdscreenshot.font_dirs() == ["/no/such/dir", "/also/nope"]
         assert tdscreenshot.select_mono(tdscreenshot.font_dirs()) is None
+        # an explicit dir list overrides the probe, but not the bundled last
+        # resort — and the answer must say which face it fell back to
+        assert tdscreenshot.find_font() == (tdscreenshot.BUNDLED_FONT, "bundled")
     finally:
         if old is None:
             del os.environ["TERM_USE_FONT_DIRS"]
@@ -161,7 +164,7 @@ def test_term_use_font_override_is_honored():
         old = os.environ.get("TERM_USE_FONT")
         os.environ["TERM_USE_FONT"] = str(font)
         try:
-            assert find_font() == str(font)
+            assert find_font() == (str(font), "override")
         finally:
             if old is None:
                 del os.environ["TERM_USE_FONT"]

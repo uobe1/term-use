@@ -136,8 +136,21 @@ def is_mono_name(path: str) -> bool:
     return any(h in low for h in MONO_NAME_HINTS)
 
 
-def find_font() -> str | None:
-    """$TERM_USE_FONT (a file) wins; otherwise probe by convention."""
+# Shipped with the package: a terminal-range subset of DejaVu Sans Mono
+# (see fonts/LICENSE-DejaVuSansMono.txt for the verbatim Bitstream/Vera
+# licence). It is a last resort, never a preference — a machine with real
+# fonts gets its own fonts.
+BUNDLED_FONT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "fonts", "DejaVuSansMono-terminal.ttf")
+
+
+def find_font() -> tuple[str | None, str]:
+    """(path, source) — "override" | "system" | "bundled" | "none".
+
+    $TERM_USE_FONT (a file) is an absolute instruction. $TERM_USE_FONT_DIRS
+    replaces the *search list*, not the fallback: if it yields nothing the
+    bundled face answers, and the result says so rather than failing quietly.
+    """
     override = os.environ.get("TERM_USE_FONT")
     if override:
         if not os.path.isfile(override):
@@ -146,8 +159,13 @@ def find_font() -> str | None:
                 f"TERM_USE_FONT points at {override!r}, which is not a file",
                 hint="unset TERM_USE_FONT to auto-probe, or point it at a real "
                      "monospace .ttf/.otf")
-        return override
-    return select_mono(font_dirs())
+        return override, "override"
+    path = select_mono(font_dirs())
+    if path:
+        return path, "system"
+    if os.path.isfile(BUNDLED_FONT):
+        return BUNDLED_FONT, "bundled"
+    return None, "none"
 
 
 def pixel(color) -> tuple | None:
@@ -276,11 +294,12 @@ def render(grid: list, out_path: str, fmt: str, cols: int | None = None,
     from PIL import Image, ImageDraw, ImageFont
 
     stats = screen.grid_stats(grid)
-    font_path = find_font()
+    font_path, font_src = find_font()
     if font_path is None:
         raise TDError(
             "font-missing",
-            "no monospace font found in the probed locations",
+            "no monospace font found in the probed locations, and the bundled "
+            "fallback face is missing from the package",
             hint="install one (apt-get install fonts-dejavu-core) or set "
                  "TERM_USE_FONT=/path/to/Mono.ttf / TERM_USE_FONT_DIRS=/dir "
                  "with one in it; the text channels need no font")
@@ -382,6 +401,7 @@ def render(grid: list, out_path: str, fmt: str, cols: int | None = None,
     glyphs["fallback_fonts"] = sorted(used_fallbacks)
     return {"path": out_path, "size": [width * charw, height * lineh],
             "grid": [width, height], "charw": charw, "lineh": lineh,
-            "font": os.path.basename(chain.primary), "palette": palette,
+            "font": os.path.basename(chain.primary), "font_source": font_src,
+            "palette": palette,
             "blank": stats["blank"], "nonblank_rows": stats["nonblank_rows"],
             "cells": stats["painted_cells"], "glyphs": glyphs}
