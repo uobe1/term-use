@@ -2,17 +2,13 @@
 
 term-use is an evidence-driven CLI that gives your coding agents complete control
 over **interactive terminal programs** — shells, nano/vim, REPLs, animated TUIs
-(ink / bubbletea), even nested tmux — and replaces guessing with proof. Built
-agent-first, in the spirit of open-source AI-skill projects like
-[superpowers](https://github.com/obra/superpowers) and
-[anthropics/skills](https://github.com/anthropics/skills): the docs are written *for
-the agent*, the CLI is the tool interface, and every answer comes with evidence
-attached.
+(ink / bubbletea), even nested tmux — and replaces guessing with proof. It is built
+agent-first: the documentation is written *for* the agent, the CLI is its tool
+interface, and every answer arrives with evidence attached.
 
-![version](https://img.shields.io/badge/version-2.0.0a3-orange)
+![version](https://img.shields.io/badge/version-2.0.0a6-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
-![requires](https://img.shields.io/badge/external%20dep-tmux%203.x-1BB91F)
-![stars](https://img.shields.io/github/stars/uobe1/term-use?style=social)
+![requires](https://img.shields.io/badge/external%20dep-tmux%203.2a%2b-1BB91F)
 ![issues](https://img.shields.io/github/issues/uobe1/term-use)
 ![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
@@ -32,12 +28,12 @@ inside a real tmux pane and gets verdicts, not vibes:
   kept on disk as ground truth: injections, output bytes, sync points.
 
 Because skills trigger by description, your agent doesn't need special instructions —
-it reads [the skill](skills/debugging-interactive-terminals/SKILL.md) and just works.
+it reads [the skill](skills/terminal-operation/SKILL.md) and just works.
 
 ## Installation
 
 term-use is **two parts**: the `term-use` CLI and the
-`debugging-interactive-terminals` agent **skill**. Install both.
+`terminal-operation` agent **skill**. Install both.
 
 **Automatic (recommended for agents).** Point your agent at the install doc and let it
 do the work — paste this into Claude Code / CodeBuddy / Codex / Cursor / any agent
@@ -46,8 +42,8 @@ that can read a file or URL. Repo: **https://github.com/uobe1/term-use**
 ```text
 Read docs/en/installation.md in the term-use repo
 (https://github.com/uobe1/term-use) and install term-use by following it:
-install the `term-use` CLI and the `debugging-interactive-terminals` skill into
-my agent. Tell me what you did.
+the `term-use` CLI (Step 1) and the `terminal-operation` skill (Step 2), both
+for the current user unless I say otherwise. Tell me what you did.
 ```
 
 If the agent can only fetch URLs (not local files), use the raw link instead:
@@ -57,32 +53,53 @@ If the agent can only fetch URLs (not local files), use the raw link instead:
 yourself (CLI + skill); the doc is written so an AI agent or a human can follow it
 end-to-end.
 
-**Requirements:** Python **3.14+** (stdlib only) and **tmux 3.x** on `PATH`; Pillow
-optional (screenshots only).
+**Requirements:** Python **3.14+** (stdlib only) and **tmux** on `PATH` — 3.2a minimum,
+**3.8+ recommended**: native command status is what keeps completion facts working through
+ssh and through prompt frameworks that rewrite `PROMPT_COMMAND`. Pillow optional
+(screenshots only); a monospace font ships as a last resort, so `screenshot` works on a
+machine with no fonts.
 
 ## The agent skill
 
-The repo ships `skills/debugging-interactive-terminals/` — an agent-facing manual of
-usage patterns and hard-won pitfalls. It is installed automatically as part of
-[Installation](#installation) (copied/linked into your agent's skills directory) and
-triggers by description, so your agent just works. Read it standalone:
-[SKILL.md](skills/debugging-interactive-terminals/SKILL.md).
+The repo ships `skills/terminal-operation/` (终端操作) — an agent-facing manual of usage
+patterns and hard-won pitfalls. It is not a debugging-only document: it covers any hands-on
+terminal work your agent does — driving an interactive program, **running real tests and E2E
+scenarios to completion**, reproducing an issue, confirming a command finished with its exit
+code, reading or screenshotting a screen, and keeping the context bill down. It is installed
+as its own step of [Installation](#installation) — copied or linked into a skills directory
+at user, project or system scope — and triggers by description, so your agent just works. Read it standalone:
+[SKILL.md](skills/terminal-operation/SKILL.md).
 
 ## The basic workflow
 
 ```bash
 term-use start -n demo --cmd bash --width 100 --height 30
-term-use wait  -n demo --shell-ready --timeout 10
 term-use send  -n demo --type "make build" --key Enter
-term-use wait  -n demo --cmd-done --expect-code 0 --timeout 120
-# → {"verdict": "met", "confidence": "fact", "exit_code": 0, ...}
+term-use wait  -n demo --done --expect-code 0 --timeout 120
+# → {"verdict": "met", "confidence": "fact", "via": "osc133", "exit_code": 0, ...}
+term-use out   -n demo            # what it printed, inside a context budget
 ```
 
-That's the whole loop: *start → shell-ready → send → wait for fact → act*. The
-wait engine also speaks regex (`--until`), quiet detection (`--quiet-ms`), pane
-death (`--exit`), AND-composition, and SGR mouse (`click X Y`); `send` handles
-debounced key rhythms (`--repeat N --delay S`) and `screen --find` turns text
-into 1-based click-ready coordinates.
+That's the whole loop: *start → send → wait for fact → read the output → act*.
+`--done` picks the strongest completion proof the target supports (OSC 133 →
+the `true` probe → pane death → quiet sampling) and says which it used. The wait
+engine also speaks regex (`--until`, plus `--since-send` so a stale anchor can't
+satisfy it), quiet detection (`--quiet-ms`), pane death (`--exit`),
+AND-composition, and SGR mouse (`click X Y`); `send` handles debounced key
+rhythms (`--repeat N --delay S`); `screen --find` turns text into 1-based
+click-ready coordinates; `replay --at 3.5` rebuilds the screen as it was at any
+earlier moment; `clear` reclaims the pane before the next capture costs you
+again; and every observation reports what it cost your context.
+
+**Defaults, decided once.** For waits that is `wait --done`, not `--until`: `--until`
+proves some text is on screen (your own echo can supply it) and caps at `inference`,
+while `--done` proves the command finished and carries its exit code. Use `--until`
+only for a marker you own, and then with `--since-send`. For observation that is the
+text channels (`screen --grep/--find/--element-at`, `out`), with `screenshot` once per
+layout question — pictures are the expensive exception, not the default, even for
+multimodal models. The OSWorld benchmark reports **12.24% for text/a11y observations
+against 5.26% for screenshots** (their numbers, not ours), and stacking image history
+is what failed there.
 
 **Detailed docs:** [docs/en/usage.md](docs/en/usage.md) — the agent-facing usage guide:
 mental model, decision tables, worked examples, common mistakes, red lines.
@@ -100,10 +117,11 @@ under `$XDG_STATE_HOME/term-use/<session>/` — `raw.log` (asciicast v2 evidence
 store) and `state.json` (atomic locator/recorder state, with `last_send_offset` as a
 **byte offset** into `raw.log`, so echo can never fake completion).
 
-Key internal guarantees: text/keys never mixed in one `send-keys` call; `--hex`
-split one byte per `-H`; OSC 133 A/B/C/D state machine tolerates chunk boundaries;
-composite verdicts take the weakest member's confidence; every failure surfaces as a
-fixed-code `TDError`, single-line JSON, exit code 1.
+Key internal guarantees: the recorder attaches before the target runs (no lost first
+bytes); tmux success means exit 0 *and* clean stderr (it can fail and exit 0); text and
+keys are never mixed in one `send-keys` call; the OSC 133 A/B/C/D scanner tolerates chunk
+boundaries and also reads VSCode's 633; composite verdicts take the weakest member's
+confidence; every failure is a fixed-code `TDError` as single-line JSON, exit 1.
 
 ## Testing
 
@@ -129,7 +147,7 @@ Bug reports, docs and code are welcome — please use **issues + pull requests**
 
 ## License
 
-Copyright (C) 2026 Uobe
+Copyright (C) 2026 uobe1
 
 Released under the **GNU General Public License v3.0 or later** (SPDX identifier:
 `GPL-3.0-or-later`). See [LICENSE](LICENSE). This program is distributed in the hope
@@ -139,5 +157,5 @@ of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 ## Documentation
 
 - Agent-facing user manual:
-  [skills/debugging-interactive-terminals/SKILL.md](skills/debugging-interactive-terminals/SKILL.md)
+  [skills/terminal-operation/SKILL.md](skills/terminal-operation/SKILL.md)
 - Usage guide: [docs/en/usage.md](docs/en/usage.md)

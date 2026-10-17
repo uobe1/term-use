@@ -62,6 +62,21 @@ def test_c_resets_between_commands():
                           ("preexec", None), ("done", 1), ("aborted", 5)]
 
 
+def test_vscode_633_markers_mean_the_same_thing():
+    """A shell already carrying VSCode's integration is evidence we can read,
+    not a conflict to refuse — 633 uses the same A/B/C/D meanings as 133."""
+    s = ("\x1b]633;A\x07\x1b]633;B\x07\x1b]633;C;cmdline\x07\x1b]633;D;3\x07")
+    assert kinds(feed_all(s)) == [("prompt", None), ("cmdline", None),
+                                  ("preexec", None), ("done", 3)]
+
+
+def test_133_and_633_do_not_cross_contaminate():
+    """A 633 C still licenses a 133 D only if the letters really pair up; mixed
+    emitters in one stream are normal (fish + a tool wrapping it)."""
+    s = "\x1b]633;C\x07\x1b]133;D;0\x07"
+    assert kinds(feed_all(s)) == [("preexec", None), ("done", 0)]
+
+
 def test_plain_text_ignored():
     assert feed_all("hello world 133;D;0 nothing \x07 to see") == []
 

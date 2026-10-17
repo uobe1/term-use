@@ -33,7 +33,7 @@ def test_error_code_table():
         "session-missing", "invalid-arguments", "socket-unreachable",
         "pane-dead", "pane-dead-by-signal", "no-shell-integration",
         "shell-not-ready", "unmanaged-pane", "expect-code-mismatch",
-        "timeout", "mouse-not-enabled", "tty-echo-broken",
+        "timeout", "mouse-not-enabled", "tty-echo-broken", "font-missing",
     }
     missing = expected - set(ERROR_CODES)
     assert not missing, f"missing codes in ERROR_CODES: {missing}"

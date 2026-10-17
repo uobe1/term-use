@@ -6,22 +6,25 @@ nested tmux — through tmux. It replaces blind `sleep`s and screen-scraping wit
 verdicts backed by evidence.
 
 - Project / source: **https://github.com/uobe1/term-use**
-- Agent skill manual: `skills/debugging-interactive-terminals/SKILL.md`
+- Agent skill manual: `skills/terminal-operation/SKILL.md`
 
 term-use is **two parts**:
 
 1. the **CLI** (`term-use`) — the tool your agent drives, and
-2. the **agent skill** (`debugging-interactive-terminals`) — the manual that teaches
+2. the **agent skill** (`terminal-operation`) — the manual that teaches
    your agent *when and how* to drive it.
 
-Install **both**. There are two ways to do it — pick whichever fits.
+They install separately, and each has three scopes: **current user**, **one project**,
+**whole system**. Install **both** parts; pick the scope that fits per part (the
+defaults in [Install steps](#install-steps) are current user for both). There are two
+ways to do it — pick whichever fits.
 
 ## Requirements
 
 | Component | Version | Why |
 |---|---|---|
 | Python | **3.14+** | the development and E2E baseline; `requires-python` in `pyproject.toml` enforces it |
-| tmux | **3.x** | the service side. OSC 133 passthrough, SGR mouse and `remain-on-exit` behavior rely on 3.x |
+| tmux | **3.2a – 3.8+** | the service side. The E2E suite runs on **both 3.7c and 3.8**; 3.8+ is recommended — see the version notes below |
 | Pillow | any current release | optional. Only `screenshot` needs it; every other command is Pillow-free |
 
 Check what you have:
@@ -31,10 +34,19 @@ python3 --version
 tmux -V
 ```
 
-No tmux? Install it with the system package manager first (`pkg install tmux` on
-Termux, `apt install tmux` on Debian/Ubuntu, `brew install tmux` on macOS). GNU
-screen is not a substitute — term-use drives panes through tmux's own
-interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
+No tmux? Install it with the system package manager first (`apt install tmux` on
+Debian/Ubuntu, `brew install tmux` on macOS, `pkg install tmux` on Termux/Android,
+`dnf install tmux` on Fedora). GNU screen is not a substitute — term-use drives panes
+through tmux's own interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
+
+**What changes across tmux versions** (measured, not assumed):
+
+| Your tmux | What that means here |
+|---|---|
+| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux, so a stopped recorder or a prompt framework that rewrites `PROMPT_COMMAND` costs the fact channel |
+| 3.7 / 3.7a / 3.7b / 3.7c | no difference that matters — the OSC 133 handling and `capture-pane -F` flags are identical across the patch line |
+| 3.8 or newer | **recommended.** tmux parses the markers itself, so `wait --done` has a second fact source (`via: tmux-command-status`) that survives ssh, a clobbered `PROMPT_COMMAND` and a dead recorder, and `screen --meta` answers "is a command running?" as a fact (`pane_command_running`). Everything else is the same |
+| older than 3.2 | unsupported: `capture-pane -e` attribute fidelity and `send-keys -H` byte handling are not reliable there |
 
 term-use has **zero Python dependencies**. tmux is an external binary, not a
 pip package.
@@ -51,21 +63,23 @@ Copy one of these prompts and send it to your agent:
 
 ```text
 Read docs/en/installation.md in the term-use repo (https://github.com/uobe1/term-use)
-and install term-use by following it: install the `term-use` CLI and the
-`debugging-interactive-terminals` skill into my agent. Tell me what you did and where
-each part landed.
+and install term-use by following it: the `term-use` CLI (Step 1) and the
+`terminal-operation` skill (Step 2), both for the current user unless I say
+otherwise. Ask me before choosing a project or system scope. Tell me what you did
+and where each part landed.
 ```
 
 If the agent can only fetch URLs (not local files), use the raw link instead:
 
 ```text
 Read https://raw.githubusercontent.com/uobe1/term-use/main/docs/en/installation.md and
-install term-use by following it: install the `term-use` CLI and the
-`debugging-interactive-terminals` skill into my agent. Tell me what you did.
+install term-use by following it: the CLI (Step 1) and the skill (Step 2), both for
+the current user unless I say otherwise. Tell me what you did.
 ```
 
-The agent follows the [Install steps](#install-steps) below — it installs the CLI
-*and* the skill. No separate script is needed; the doc is the instruction set.
+The agent follows the [Install steps](#install-steps) below — the CLI and the skill
+are two artifacts with separate scopes, so it installs both and says where each
+landed. No separate script is needed; the doc is the instruction set.
 
 ---
 
@@ -89,76 +103,131 @@ available. Pick one — not both.
 Both options run these steps. The agent runs them from Option A; you run them from
 Option B.
 
+term-use is **two artifacts that install differently**, and you pick a scope for each:
+
+| Artifact | What it is | Installed by | Scopes |
+|---|---|---|---|
+| **CLI** | the `term-use` executable — a Python package | `uv tool install`, `pip`, or a venv | user · project · system |
+| **Skill** | `skills/terminal-operation/` — documentation, no code, nothing to run | copy or symlink the directory | user · project · system |
+
+They are independent: the CLI works without the skill (read `--help`), and the skill
+is dead weight without the CLI. The scopes are independent too — a system-wide CLI
+with a per-project skill is a normal setup.
+
 ### Step 1 — install the CLI
 
-Pick one method. uv manages an isolated tool environment; pip installs into whatever
-environment is currently active; the local-clone method is for development.
-
-**uv (recommended)**
+**For the current user** (default, and what `uv` does by itself):
 
 ```bash
 uv tool install git+https://github.com/uobe1/term-use.git
-```
-
-For screenshot support, add Pillow to the tool environment:
-
-```bash
+# image channel (screenshot) needs Pillow in the tool environment:
 uv tool install git+https://github.com/uobe1/term-use.git --with pillow
 ```
 
-**pip**
+The 2.0 line is developed on its own alpha branches and `main` still carries the older
+`term-debug` layout, so if you need 2.0 before it merges, install from a clone checked
+out at the branch you want — do not bake a ref into the command above:
 
 ```bash
-python3 -m pip install git+https://github.com/uobe1/term-use.git
+git clone https://github.com/uobe1/term-use.git && cd term-use
+uv tool install . --with pillow        # or `uv tool install -e .` to hack on it
 ```
 
-**From a local clone (development)**
+The executable lands in `~/.local/bin`; if `term-use --help` is not found, that
+directory is not on `PATH` — run `uv tool update-shell` or export
+`PATH="$HOME/.local/bin:$PATH"`.
+
+**For one project** — install it into that project's own environment, so the version
+is pinned with the project and nothing global is touched:
 
 ```bash
-git clone https://github.com/uobe1/term-use.git
-cd term-use
-uv tool install -e .      # editable: source edits take effect immediately
+cd /path/to/my-project
+uv venv && uv pip install --editable /path/to/term-use          # or the git URL
+uv run term-use --help                                          # inside the venv
 ```
 
-To run once without installing anything:
+Without `uv`, the same thing is `python3 -m venv .venv && .venv/bin/pip install /path/to/term-use`,
+then call `.venv/bin/term-use`. An agent working in that project can also skip the
+install entirely and run the source checkout: `PYTHONPATH=/path/to/term-use/src python3 -m termuse …`.
+
+**For every user on the machine** — a venv in a shared read-only location plus one
+symlink on `PATH`. This keeps the system Python untouched (no distro-package conflict)
+and gives every account the same version:
+
+```bash
+sudo python3 -m venv /opt/term-use
+sudo /opt/term-use/bin/pip install "term-use[image] @ git+https://github.com/uobe1/term-use.git"
+sudo ln -s /opt/term-use/bin/term-use /usr/local/bin/term-use
+```
+
+`pip install` on its own (`python3 -m pip install git+…`) also works and goes wherever
+the active environment points — which is exactly why the two scopes above spell out
+which environment that is.
+
+To try it without installing anything at all:
 
 ```bash
 uvx --from . term-use --help
 ```
 
-If `term-use --help` is not found after a uv install, uv's tool bin
-(`~/.local/bin`) is not on `PATH` — run `uv tool update-shell` or export
-`PATH="$HOME/.local/bin:$PATH"`.
-
 ### Step 2 — install the skill
 
-The skill is the `skills/debugging-interactive-terminals/` directory in this repo.
-Copy or symlink it into your agent's skills directory so the agent can find it.
+The skill is the `skills/terminal-operation/` directory in this repo — a core
+`SKILL.md` plus the `references/` it points at. Install the whole directory, not
+just the core. It is documentation, so nothing is compiled or run: an "install" is
+one copy or one symlink, and the only choice is which scope should see it.
+
+**For the current user** — `~/.agents/skills/`, the location most agents and
+`npx skills` already agree on, so one install serves all of them:
+
+```bash
+SKILLS_DIR="$HOME/.agents/skills"; mkdir -p "$SKILLS_DIR"
+ln -s /path/to/term-use/skills/terminal-operation "$SKILLS_DIR/terminal-operation"
+```
+
+A symlink stays current with `git pull`; to pin a version, copy instead:
+
+```bash
+cp -r /path/to/term-use/skills/terminal-operation "$SKILLS_DIR/terminal-operation"
+```
+
+**For one project** — the same two commands pointed at the repository you are
+working in. Only agents opened in that project see it, and it travels with the
+repo, so a team shares one pinned version:
+
+```bash
+cd /path/to/my-project
+mkdir -p .agents/skills
+ln -s /path/to/term-use/skills/terminal-operation .agents/skills/terminal-operation
+```
+
+Add `.agents/` to `.gitignore` if you symlink (the path is machine-local); if you
+copy it, commit it and the project carries its own skill.
+
+**For every user on the machine** — one read-only copy in a shared place, then a
+symlink per account pointing at it. There is no cross-agent standard for a
+system-wide skills directory, so the shared copy plus per-user links is the form
+that works everywhere; if your own agent does document a system directory, put the
+link there instead and skip the per-user step:
+
+```bash
+sudo mkdir -p /usr/local/share/agents/skills
+sudo cp -r /path/to/term-use/skills/terminal-operation /usr/local/share/agents/skills/
+# then, as each user:
+mkdir -p "$HOME/.agents/skills"
+ln -s /usr/local/share/agents/skills/terminal-operation "$HOME/.agents/skills/terminal-operation"
+```
+
+If your agent reads only its own directory, everything above is the same command
+with a different path:
 
 | Agent | Skills directory |
 |---|---|
-| CodeBuddy | `~/.codebuddy/skills/` |
 | Claude Code | `~/.claude/skills/` |
 | Codex | `~/.codex/skills/` |
 | Cursor | `~/.cursor/skills/` |
 | Gemini CLI | `~/.gemini/skills/` |
 | OpenCode | `~/.config/opencode/skills/` |
-
-From the repo root, symlink (recommended — stays current with `git pull`):
-
-```bash
-ln -s "$PWD/skills/debugging-interactive-terminals" \
-      ~/.codebuddy/skills/debugging-interactive-terminals
-```
-
-…or copy:
-
-```bash
-cp -r "$PWD/skills/debugging-interactive-terminals" \
-      ~/.codebuddy/skills/debugging-interactive-terminals
-```
-
-(Replace `~/.codebuddy/skills` with your agent's directory from the table above.)
 
 Restart the agent (or start a fresh session) so it picks up the new skill. It then
 triggers automatically by description — no further setup.
@@ -169,7 +238,7 @@ triggers automatically by description — no further setup.
 term-use sessions
 # → [] — or a JSON array of existing tmux sessions; both are success
 
-ls ~/.codebuddy/skills/debugging-interactive-terminals/SKILL.md   # skill present
+ls "$SKILLS_DIR/terminal-operation/SKILL.md"   # skill present
 ```
 
 A real end-to-end check that the CLI *and* the method work:
@@ -220,21 +289,33 @@ uv tool install git+https://github.com/uobe1/term-use.git@<commit>
 (No tags have been cut yet; pin a commit if you need stability.)
 
 If you installed the skill by symlink from a clone, re-run `git pull` in the clone to
-refresh it. If you copied it, re-copy from a fresh clone.
+refresh it. If you copied it, re-copy from a fresh clone — and if you installed the
+system-wide copy, refreshing `/usr/local/share/agents/skills/terminal-operation`
+updates every account whose symlink points at it.
 
 ## Uninstall
 
+Remove the two artifacts separately, from whichever scope you used.
+
+CLI:
+
 ```bash
-uv tool uninstall term-use
-# or
+uv tool uninstall term-use                    # current user
+.venv/bin/pip uninstall term-use              # one project (run from inside it)
+sudo rm -f /usr/local/bin/term-use && sudo rm -rf /opt/term-use   # system
+# or, if you installed with pip into an active environment:
 python3 -m pip uninstall term-use
 ```
 
-Remove the skill from your agent's skills directory:
+Skill:
 
 ```bash
-rm -rf ~/.codebuddy/skills/debugging-interactive-terminals
+rm -rf "$SKILLS_DIR/terminal-operation"       # user or project scope
+sudo rm -rf /usr/local/share/agents/skills/terminal-operation   # system
 ```
+
+A symlinked skill is one link: removing it leaves the clone (and the shared system
+copy) untouched.
 
 Recordings under `$XDG_STATE_HOME/term-use/` are plain files; delete the
 directory for a full purge.
@@ -277,8 +358,9 @@ between `start` and the later command — keep it stable.
 
 The skill symlink/copy may be in the wrong directory, or the agent session started
 before the skill was added. Confirm
-`~/.codebuddy/skills/debugging-interactive-terminals/SKILL.md` exists (adjust the
-path for your agent), then restart the agent or open a fresh session.
+`$SKILLS_DIR/terminal-operation/SKILL.md` exists (Step 2 sets that path; use your
+agent's own skills directory if it does not read `~/.agents/skills`), then restart
+the agent or open a fresh session.
 
 ### Sessions "disappear" between commands
 
@@ -290,7 +372,7 @@ for the whole working session.
 
 - Issues: https://github.com/uobe1/term-use/issues
 - Driving patterns for agents: [usage.md](usage.md)
-- Agent skill manual: [SKILL.md](../../skills/debugging-interactive-terminals/SKILL.md)
+- Agent skill manual: [SKILL.md](../../skills/terminal-operation/SKILL.md)
 
 When filing a bug, paste the structured error JSON verbatim — it already contains the
 screen snapshot, cursor position and raw-stream tail needed to reproduce.

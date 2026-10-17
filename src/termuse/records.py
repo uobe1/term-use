@@ -69,6 +69,154 @@ def stream_since(session: str, offset: int) -> str:
                    if code == "o" and isinstance(data, str))
 
 
+def header(session: str) -> dict | None:
+    """The v2 header line (carries the wall-clock timestamp the elapsed
+    seconds are measured from), or None when there is no recording."""
+    try:
+        with (session_dir(session) / "raw.log").open("r", encoding="utf-8",
+                                                     errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    try:
+        head = json.loads(first)
+    except ValueError:
+        return None
+    return head if isinstance(head, dict) else None
+
+
+def last_event_ts(session: str, code: str = "o") -> float | None:
+    """Elapsed time of the newest event of `code`, read from the file tail.
+
+    A tail read (not a full replay) matters: this is called while a session
+    may have megabytes of recording, and an age signal must cost microseconds.
+    """
+    path = session_dir(session) / "raw.log"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    start = max(0, size - 65536)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = chunk.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]  # first line is a partial read
+    for line in reversed(lines):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(ev, list) and len(ev) >= 3
+                and ev[1] == code and isinstance(ev[0], (int, float))):
+            return float(ev[0])
+    return None
+
+
+def output_age_s(session: str) -> float | None:
+    """Seconds since the pane last emitted anything (None if unmeasurable:
+    no recording, or nothing ever written)."""
+    head = header(session)
+    last = last_event_ts(session, "o")
+    if head is None or last is None or head.get("timestamp") is None:
+        return None
+    return max(0.0, round(time.time() - head["timestamp"] - last, 2))
+
+
+# raw.log stores the stream as JSON strings, and JSON escapes control characters
+# even with ensure_ascii=False — so on disk the marker reads `\u001b]133;A`, not
+# the raw byte. Match both spellings rather than betting on which one appears.
+_MARKERS = tuple(
+    f"{esc}]{code};{letter}".encode()
+    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "ABCD")
+
+
+def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
+    """Has this pane actually emitted command markers? Evidence, not assumption.
+
+    `start` can only know what it injected itself; fish >= 4.0 emits OSC 133
+    natively and a user's zsh/bash may carry VSCode's (633) or WezTerm's (133)
+    integration. Refusing those sessions was a portability hole — the strongest
+    evidence the tool offers was gated on a guess made at launch time.
+    """
+    path = session_dir(session) / "raw.log"
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - 65536))
+            chunk = fh.read()
+        if any(m in chunk for m in _MARKERS):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def markers_seen(session: str, since_offset: int = 0, kinds=("D",)) -> bool:
+    """Did the pane emit any of these OSC 133/633 markers in the stream range?
+
+    A launch-time claim of shell integration is not a promise: a prompt
+    framework that rewrites PROMPT_COMMAND (starship, powerline) takes the
+    channel away mid-session. `kinds` defaults to `D` alone because `D` is the
+    completion answer — `C` (from PS0) can keep flowing while `D` is dead, and
+    counting both would miss exactly that case.
+    """
+    text = stream_since(session, since_offset)
+    return any(f"\x1b]{code};{m}" in text
+               for code in ("133", "633") for m in kinds)
+
+
+def pending_input(session: str, since_offset: int) -> str | None:
+    """Text injected after the last Enter — the "half-typed line" signal.
+
+    When a remote shell behind the pane stops reading (a hung ssh session, a
+    program that swallowed the keystrokes), the typed text still echoes on the
+    input row, so a plain screen read looks like progress. Reporting what the
+    client injected without ever completing it lets an agent tell "no output"
+    apart from "my input never landed" instead of guessing with a C-c.
+    """
+    typed = ""
+    for _ts, code, data, _pos in events_since(session, since_offset):
+        if code != "i" or not isinstance(data, list):
+            continue
+        for ev in data:
+            if not isinstance(ev, dict):
+                continue
+            if "text" in ev:
+                typed += ev["text"]
+            elif "key" in ev:
+                if str(ev["key"]).lower() in ("enter", "c-m", "c-j", "m-enter"):
+                    typed = ""  # the line was submitted: nothing pending
+    return typed or None
+
+
+def last_sent_text(session: str, since_offset: int) -> str | None:
+    """The text of the newest complete injection at or after that offset.
+
+    `pending_input` answers "what is still sitting in the buffer"; this answers
+    "what did the agent ask the shell to run", which is what an exit code has to
+    be interpreted against. Keys are ignored — a line is its typed text.
+    """
+    last = None
+    for _ts, code, data, _pos in events_since(session, since_offset):
+        if code != "i" or not isinstance(data, list):
+            continue
+        text = "".join(ev["text"] for ev in data
+                       if isinstance(ev, dict) and "text" in ev)
+        if any(isinstance(ev, dict) and str(ev.get("key", "")).lower()
+               in ("enter", "c-m", "c-j", "m-enter") for ev in data):
+            last = text or None
+    return last
+
+
 class V2Writer:
     """Appends events to raw.log and persists state.json atomically."""
 

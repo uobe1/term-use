@@ -11,6 +11,9 @@ The scanner tolerates chunk boundaries mid-sequence and skips over any other
 escape sequences (CSI, other OSCs) so their payloads can never be mistaken
 for markers. Works on the decoded text of raw.log o-events (ESC survives
 UTF-8 decoding as \\x1b).
+
+Both OSC 133 (the published scheme, also what fish >= 4.0 emits natively) and
+OSC 633 (VSCode's code, same A/B/C/D meanings) are accepted — see _osc_event.
 """
 from termuse.errors import TDError
 
@@ -70,9 +73,15 @@ class OSC133Scanner:
         return j + 1 if j < len(s) else len(s)      # 2-char escape
 
     def _osc_event(self, payload: str):
-        if not payload.startswith("133;"):
+        # 633 is VSCode's own OSC code, and its A/B/C/D markers mean exactly the
+        # same thing — a shell already carrying VSCode integration is evidence
+        # we can read, not a conflict to refuse.
+        for prefix in ("133;", "633;"):
+            if payload.startswith(prefix):
+                body = payload[len(prefix):]
+                break
+        else:
             return None  # some other OSC (title, clipboard, ...)
-        body = payload[4:]
         marker, _, param = body.partition(";")
         if marker == "A":
             self.saw_c = False

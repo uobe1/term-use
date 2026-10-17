@@ -7,12 +7,21 @@ ERROR_CODES = (
     # CLI argument validation failure (--repeat < 1, bad hex, unknown key, ...).
     "invalid-arguments",
     "socket-unreachable",
+    # tmux reported a failure we could not fingerprint (nonzero exit or error
+    # text on stderr); its own message rides along so the case stays diagnosable.
+    "tmux-failed",
     "pane-dead",
     "pane-dead-by-signal",
     "no-shell-integration",
     # wait on a pane that exists in tmux but has no term-use records
     # (e.g. nested tmux): screen channels degrade, shell-protocol facts refuse.
     "unmanaged-pane",
+    # The shell-protocol channel cannot answer at all in this shape: the
+    # pane's foreground is a terminal passthrough (ssh/mosh/nested tmux) whose
+    # remote markers arrive as inert bytes, or a prompt framework replaced the
+    # injected hooks. Distinct from `timeout` (still running) and from
+    # `shell-not-ready` (inside a program — where a quit key is the right move).
+    "shell-protocol-unavailable",
     # wait --shell-ready: the `true` probe got no OSC 133 answer in time
     # (a live interactive program swallows the probe, or the shell is slow).
     "shell-not-ready",
@@ -22,6 +31,9 @@ ERROR_CODES = (
     "tty-echo-broken",
     # Image channel: Pillow unavailable (or disabled via env switch).
     "pillow-missing",
+    # Image channel: no monospace font to draw the cell grid with
+    # (also raised when TERM_USE_FONT points at a nonexistent file).
+    "font-missing",
 )
 
 

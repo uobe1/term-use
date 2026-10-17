@@ -8,6 +8,12 @@ TD="python3 -m termuse"
 SOCK="td11sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
 export XDG_STATE_HOME="$TMP/state"
+# This test addresses the DEFAULT server on purpose (bare-name targeting), and
+# a shared /tmp/tmux-<uid> can hold a `default` socket belonging to another
+# user/security context — tmux then answers "access not allowed". Own the
+# socket directory so the test exercises term-use, not the machine's leftovers.
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; tmux -L inner kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
 trap cleanup EXIT

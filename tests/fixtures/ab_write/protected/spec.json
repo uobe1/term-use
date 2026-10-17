@@ -1,0 +1,19 @@
+{
+  "note": "Ground truth for the ab_write A/B fixture. Lives outside the arm's writable tree on purpose: an agent that could edit the checker would pass it. BenchJack's audit of 4,458 tasks found every public benchmark hackable, most often by rewriting the assertions in reach.",
+  "ledger": {
+    "header": ["seq", "step", "status"],
+    "steps_in_order": ["init", "build", "publish"],
+    "duplicate_steps_are_failure": true
+  },
+  "sync": {
+    "db": "db.sqlite",
+    "user_version": 7,
+    "table": "records",
+    "rows": ["alpha", "beta", "gamma"]
+  },
+  "expected_injections": {
+    "deploy_steps": 3,
+    "sync_run": 1,
+    "sync_check": 1
+  }
+}
