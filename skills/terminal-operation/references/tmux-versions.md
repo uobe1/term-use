@@ -23,7 +23,9 @@ tmux parses OSC 133 itself and keeps per-pane state:
 says which channel answered (`via`/`channel` = `osc133` or `tmux-command-status`). It is a
 second fact source, and the one that survives the three shapes where term-use's own
 recording cannot: a `pipe-pane` that stopped, a prompt framework that took `PROMPT_COMMAND`
-back, and markers forwarded from the far side of ssh.
+back, and markers forwarded from the far side of ssh. On tmux 3.2a–3.7c there is no second
+server, so `via: osc133` is *all this build can do* — it does not mean the oracle was
+chosen over an alternative. Tell the two apart with `tmux -V`, not with the verdict.
 
 ### Limits, stated because they change what you can claim
 

@@ -133,6 +133,10 @@ own pipeline, not from the program under test. Single-quote values that contain 
 syntax (`--type 'echo exit=$?'`), and when a claim depends on `$`-syntax, read the
 echoed command line back from `out` before believing the line under it.
 
+Text that carries **both** quote styles (`python3 -c "...'file?mode=ro'..."`) needs the
+`'"'"'` dance or a file: `send --type-file PATH` reads the file and types it verbatim, so
+no shell on your side ever touches it.
+
 ### Driving a plain CLI inside a shell pane
 
 Most of this guide is about programs with a screen. A non-interactive command run in a

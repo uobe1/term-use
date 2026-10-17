@@ -275,6 +275,20 @@ def cmd_send(args) -> int:
     if state is not None:
         stamp_native_baseline(target, state)
     sent_text = "".join(args.type or [])
+    if args.type_file:
+        try:
+            with open(args.type_file, encoding="utf-8") as fh:
+                body = fh.read()
+        except OSError as exc:
+            raise TDError("invalid-arguments",
+                          f"--type-file {args.type_file!r} could not be read: {exc}",
+                          hint="pass a readable file, or use --type for text your "
+                               "shell can quote; the file is sent verbatim and its "
+                               "final newline is stripped")
+        if body.endswith("\n"):
+            body = body[:-1]
+        sent_text += body
+    texts = list(args.type or []) + ([body] if args.type_file else [])
     warning = None
     events: list[dict] = []
     for i in range(repeat):
@@ -283,7 +297,7 @@ def cmd_send(args) -> int:
         # Red line: every repetition is a full independent send (text and
         # keys stay in separate send-keys calls). Never collapse repeats
         # into one send-keys invocation — debounced menus would eat them.
-        rep = tdinput.send(target, args.type or [], args.key or [], args.hex or [])
+        rep = tdinput.send(target, texts, args.key or [], args.hex or [])
         if writer is not None:
             writer.append("i", rep)  # one i-event per repetition: trace shows the rhythm
         events += rep
@@ -788,6 +802,11 @@ def cmd_out(args) -> int:
     if args.json:
         print(json.dumps({"ok": True, "scope": "all" if args.all
                          else "since-send",
+                          # …and where that window begins, because "no publish
+                          # row" is a different finding from "my window starts
+                          # after it" (an ab8 arm could not tell the two apart
+                          # and re-verified a non-idempotent step three times).
+                          "since_offset": None if args.all else offset,
                           "bytes": ctx["bytes"], "truncated": omitted > 0,
                           "omitted_bytes": omitted, "redrawn": redrawn,
                           "text": shown, "context": ctx}, ensure_ascii=False))
@@ -1089,6 +1108,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
     p.add_argument("--type", action="append", metavar="TEXT",
                    help="literal text to type (repeatable, sent before keys)")
+    # Both arms of the ab8 round had to guess how to `--type` a value containing
+    # single AND double quotes (`python3 -c "…'file?mode=ro'…"`), which is a
+    # shell-quoting problem, not a tool one — and the pane runs whatever your
+    # shell produced. A path skips the guess entirely.
+    p.add_argument("--type-file", metavar="PATH", default=None,
+                   help="read the text to type from a file (last newline "
+                        "stripped); beats --type for values carrying both "
+                        "quote styles")
     p.add_argument("--key", action="append", metavar="KEY",
                    help="key name e.g. Enter Escape C-c (repeatable)")
     p.add_argument("--hex", action="append", metavar="HEX",

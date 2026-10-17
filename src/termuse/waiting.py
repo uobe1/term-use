@@ -898,10 +898,11 @@ def line_scope(text: str | None) -> str | None:
     notes = []
     if ";" in bare or "\n" in bare:
         notes.append("`;`/newline: the code is the LAST command's, so an earlier "
-                     "one can have failed unseen")
+                     "one can have failed unseen — the part you care about is "
+                     "proven by evidence.screen, not by this number")
     if "@@" in flat:
-        notes.append("`&&`/`||`: the line short-circuits, so a nonzero code names "
-                     "no stage — read the screen for which part ran")
+        notes.append("`&&`/`||`: zero means every stage succeeded; nonzero names "
+                     "no stage, so read evidence.screen for where it stopped")
     if "|" in flat:
         notes.append("pipeline: the code is the LAST stage's, unless the shell "
                      "sets pipefail")

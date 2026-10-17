@@ -155,12 +155,19 @@ assert 0 <= c[0] < w and 0 <= c[1] < h, f"cursor {c} outside grid {w}x{h}"
 # --- replay must not leave a mess or fake a managed session -----------------
 [ ! -d "$XDG_STATE_HOME/term-use/tu-replay" ] \
   || fail "the scratch replay server must not create record dirs"
+# A missing optional dependency is not a product failure (repo convention), and
+# `python3 -m termuse` runs the interpreter on PATH — which is not the venv that
+# `uv tool install --with pillow` built. Ask the interpreter that will run the CLI.
+if python3 -c "import PIL" >/dev/null 2>&1; then
 $TD replay -n td23t --at 2.0 --format png -o "$TMP/f.png" >/dev/null \
   || fail "replay --format png failed"
 python3 -c "
 import json, os
 assert os.path.getsize('$TMP/f.png') > 100
 " || fail "replayed frame png"
+else
+  echo "SKIP: replay --format png (no Pillow on $(command -v python3); run the suite with a PATH that carries it)"
+fi
 # `--no-cursor` is the same switch `screenshot` has, with the same effect
 $TD replay -n td23t --at 2.0 --format json --no-cursor | python3 -c '
 import json, sys

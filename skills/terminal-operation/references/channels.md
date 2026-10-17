@@ -31,6 +31,9 @@ is literally `default` (`-n default:inner:0.0`).
   `--hex 1c` is `C-\`, which has no key name; `--hex 1b5b31333b3275` is kitty Shift+Enter.
 - Single-letter program keys are *text*: `--type q`, not `--key q`. `--key` accepts tmux
   key names only and errors with the table if you try something else.
+- `--type-file PATH` reads the text from a file (final newline stripped) and sends it
+  verbatim. Use it the moment your text carries both quote styles — `'"'"'` gymnastics
+  are your *shell's* problem, and the pane runs whatever the shell produced.
 - The result carries `offset`: the byte position in `raw.log` where this send's output
   begins. That is what `--done`/`--cmd-done` and `--since-send` scope to.
 - `sent` summarizes what went in — `{text, keys, calls}` (`calls` = tmux invocations, so
@@ -101,7 +104,10 @@ Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
 ## out / replay / trace
 
 - `out -n N [--all] [--max-bytes K] [--json]` — the pane's own byte stream since your last
-  send (or the whole session), head+tail with `interior bytes omitted` marked. It is the
+  send (or the whole session), head+tail with `interior bytes omitted` marked. `--json`
+  states `since_offset`, where the window begins, so "the row is not in here" can be told
+  apart from "my window starts after it" (an ab8 arm could not tell, and re-verified a
+  non-idempotent step three times). It is the
   *pane*, so it contains your echoed input line and the prompt that follows; a trailing
   prompt with nothing after it means "the program said nothing", which is a result.
   `--json` adds `bytes/truncated/omitted_bytes/redrawn/full_bytes`. When `redrawn` is true

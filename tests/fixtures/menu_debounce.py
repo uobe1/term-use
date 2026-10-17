@@ -18,7 +18,12 @@ import termios
 import time
 import tty
 
-DEBOUNCE = 0.45
+DEBOUNCE = float(os.environ.get("MENU_DEBOUNCE_S") or 0.45)
+# Settable because the e2e that proves "one call, two keys, one move" measures a
+# gap *inside* one term-use invocation — two `send-keys` subprocesses, ~0.1-1.5s
+# apart depending on load. At 0.45s the control failed on a busy box, which was
+# the machine, not the tool; the test now asks for a window wider than the worst
+# intra-call gap and keeps `--delay` above that.
 
 
 def main() -> None:

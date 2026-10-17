@@ -18,6 +18,11 @@ fail() { echo "E2E-14 FAIL: $*"; exit 1; }
 
 selected() { $TD screen -n "$NAME" | grep -o 'SELECTED:[0-9]*'; }
 
+# The debounce window must be wider than the gap *inside* one term-use `send`
+# (two send-keys subprocesses, 0.1-1.5s apart on a loaded box) and narrower than
+# the --delay between repetitions. At the fixture's 0.45s default this control
+# failed under load and the failure was the machine's, not the tool's.
+export MENU_DEBOUNCE_S=1.5
 $TD start -n "$NAME" --cmd bash --socket "$SOCK" --width 100 --height 30 >/dev/null \
   || fail "start failed"
 $TD send -n "$NAME" --type "python3 $ROOT/tests/fixtures/menu_debounce.py" --key Enter \
@@ -29,12 +34,13 @@ $TD send -n "$NAME" --key Up --key Up >/dev/null || fail "send failed"
 sleep 1
 [ "$(selected)" = "SELECTED:1" ] || fail "one-call two Ups should move once, got: $(selected)"
 
-# --- --repeat 2 --delay 0.6: each repetition is a full independent send ---
+# --- --repeat 2 --delay 2.2 (> the debounce window): each repetition is a full
+# --- independent send, so the menu applies both
 BEFORE="$(grep -o '"key": "Up"' "$XDG_STATE_HOME/term-use/$NAME/raw.log" | wc -l)"
-$TD send -n "$NAME" --key Up --repeat 2 --delay 0.6 >"$TMP/repeat.json" \
+$TD send -n "$NAME" --key Up --repeat 2 --delay 2.2 >"$TMP/repeat.json" \
   || fail "send --repeat failed"
 sleep 2
-[ "$(selected)" = "SELECTED:3" ] || fail "--repeat 2 --delay 0.6 should move twice, got: $(selected)"
+[ "$(selected)" = "SELECTED:3" ] || fail "--repeat 2 --delay 2.2 should move twice, got: $(selected)"
 AFTER="$(grep -o '"key": "Up"' "$XDG_STATE_HOME/term-use/$NAME/raw.log" | wc -l)"
 [ "$((AFTER - BEFORE))" -eq 2 ] || fail "expected 2 i-event Up records, got $((AFTER - BEFORE))"
 

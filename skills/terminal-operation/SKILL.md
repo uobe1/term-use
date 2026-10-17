@@ -85,6 +85,12 @@ opening `raw.log` yourself.
   *flag* (`--nope`); do not probe with an unknown positional word — a program that takes
   one argument may accept `bogus` as legitimate input and record it. A refusal that prints
   `usage:` and exits 2 is the safe answer, and it names every subcommand at once.
+  **Reading the program's own source is cheaper still and in bounds**: it answers "what
+  does it write, what argv does it accept" for zero sends. The red line is changing its
+  state, not looking at it.
+- **You are never obliged to run a preflight.** If `check`/`status` only prints what a real
+  run prints, running it adds a stale anchor and buys nothing — go straight to the write
+  and the artifact.
 - **When it is silent and persists, find the artifact by time, not by name.** `send`
   `touch .probe` before the run, then `find . -newer .probe` after it: the new file *is*
   the completion record. Open it read-only (`"file:x.db?mode=ro", uri=True`). Skip the
@@ -113,8 +119,9 @@ opening `raw.log` yourself.
 - **Your own shell eats `$?` / `$(…)` / backticks before tmux sees them.** `--type "echo
   exit=$?"` is quoted on *your* side, so it expands first and the pane faithfully runs a
   command you never wrote — the evidence then reads `exit=0` and is fabricated.
-  Single-quote the whole value (`--type 'echo exit=$?'`), then read the echoed line back
-  before believing the line under it.
+  Single-quote the whole value (`--type 'echo exit=$?'`); when the text carries both quote
+  styles, don't hand-build `'"'"'` — write it to a file and use `--type-file`. Then read
+  the echoed line back before believing the line under it.
 - **Trailing spaces**: the terminal rstrips lines; `--until` self-heals, so do not write a
   regex that requires them.
 - **Long typed text wraps** at the pane width, so a `--until` pattern spanning it must

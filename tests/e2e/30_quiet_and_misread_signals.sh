@@ -105,6 +105,35 @@ assert 'LAST command' in n and 'failed unseen' in n, \
     f'a semicolon line must be caveated where the number cannot be: {n!r}'
 " || fail "compound-line scope (see above)"
 
+# --- 1e. `clear` in a plain shell is not a program that repositions text -----
+# The ab8 baseline arm read a *correct* ledger, saw the redraw note, and did not
+# believe it — two extra verification rounds on a non-idempotent program.
+$TD send -n td30 --socket "$SOCK" --type "clear; echo TD30_CLEARED" --key Enter >/dev/null
+$TD wait -n td30 --socket "$SOCK" --done --timeout 15 >/dev/null \
+  || fail "clear+echo never finished"
+$TD out -n td30 --socket "$SOCK" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert "TD30_CLEARED" in r["text"], r
+assert not r["redrawn"], "a shell that merely cleared must not be called a redraw"
+assert r["scope"] == "since-send" and isinstance(r["since_offset"], int), r
+' || fail "clear flagged as a redraw, or no window offset (see above)"
+
+# --- 1f. --type-file: text carrying both quote styles, no shell guessing -----
+cat > "$TMP/quoted.txt" <<'Q'
+python3 -c "print('TD30_QUOTE_OK')"
+Q
+$TD send -n td30 --socket "$SOCK" --type-file "$TMP/quoted.txt" --key Enter >/dev/null
+$TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 15 >/dev/null \
+  || fail "--type-file text never ran"
+$TD out -n td30 --socket "$SOCK" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert "TD30_QUOTE_OK" in r["text"], r
+assert "\"print('"'"'TD30_QUOTE_OK'"'"')\"" in r["text"], \
+    "the pane must have received the quoting verbatim: " + r["text"]
+' || fail "--type-file delivery (see above)"
+
 # --- 1c. trace says when the session started, so elapsed maps to wall clock -
 $TD trace -n td30 --socket "$SOCK" 2>/dev/null | head -1 | grep -q 'started=' \
   || fail "trace's header must carry the recording's start time (elapsed alone cannot be attributed to a file write)"

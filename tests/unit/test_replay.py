@@ -53,10 +53,18 @@ def test_trim_does_not_split_a_multibyte_character_into_an_error():
 def test_redrawn_detection_names_tui_style_output():
     assert replay.looks_redrawn("\x1b[?1049h\x1b[H hello") is True
     assert replay.looks_redrawn("just some lines\nof output\n") is False
-    # Absolute positioning and cursor-up are redraw; a menu's `2J`+`H` is redraw.
-    assert replay.looks_redrawn("\x1b[2J\x1b[HMENU_READY") is True
+    # Absolute positioning and cursor-up are redraw.
     assert replay.looks_redrawn("\x1b[12;1HCLICKED:3,4\x1b[K") is True
     assert replay.looks_redrawn("downloading \x1b[1Aoverwritten line") is True
+    # A bare `2J` (+ `H`) is NOT enough: that is byte-for-byte what `clear` emits
+    # in a plain shell, and the ab8 round measured what a false positive costs —
+    # an arm read a correct ledger, was told the linear text "is not the frame it
+    # showed", and spent two more verification rounds on a non-idempotent program.
+    # A program that really repaints still matches via alt-screen, absolute
+    # positioning or cursor-up; missing the rare clear-only painter is the cheap
+    # error, distrusting a correct read is not.
+    assert replay.looks_redrawn("\x1b[2J\x1b[HMENU_READY") is False
+    assert replay.looks_redrawn("\x1b[H\x1b[2J\x1b[3J") is False   # `clear`
     # What used to fire on it, and misled both arms of the ab_write A/B down a
     # `replay` detour: colored traceback text (SGR bold) and bash's own bracketed
     # paste markers / prompt repaint are not a program repositioning its output.

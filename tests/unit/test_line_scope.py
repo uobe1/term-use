@@ -33,9 +33,10 @@ def test_semicolon_line_reports_the_last_command():
 
 def test_short_circuit_names_no_stage():
     note = line_scope("a && b")
-    assert note and "short-circuits" in note and "`;`" not in note
+    assert note and "names no stage" in note and "`;`" not in note
+    assert "zero means every stage succeeded" in note
     note2 = line_scope("a || b")
-    assert note2 and "short-circuits" in note2 and "`;`" not in note2
+    assert note2 and "names no stage" in note2 and "`;`" not in note2
 
 
 def test_pipeline_reports_the_last_stage():

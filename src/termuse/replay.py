@@ -34,10 +34,14 @@ from termuse.errors import TDError
 # narrow — an earlier substring list matched `\x1b[1;` (bold SGR: every colored
 # Python traceback) and a bare `\x1b[H` (bash repainting its own prompt on C-l);
 # that false positive sends the reader on a `replay` detour for no reason.
-# Bracketed paste (`?2004`) and color codes are not redraw.
+# A bare `\x1b[2J` went the same way: `clear` in a plain shell emits it, and the
+# warning then told an agent not to trust a correct read of an artifact file —
+# measured in the ab8 round, where the arm built a second and third verification
+# read because of it. A program that really repaints still matches: alt-screen,
+# absolute positioning or cursor-up. Bracketed paste (`?2004`) and color codes
+# are not redraw.
 _REDRAW_RE = re.compile(
     r"\x1b\[\?(?:47|1047|1049)h"      # enter alternate screen
-    r"|\x1b\[2J"                       # erase whole screen
     r"|\x1b\[\d+;\d+H"                 # absolute cursor position
     r"|\x1b\[\d+A")                    # cursor up (in-place repaint)
 
