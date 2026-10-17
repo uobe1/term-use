@@ -101,7 +101,7 @@ import json
 v = json.load(open('$TMP/compound.json'))
 assert v['confidence'] == 'fact' and v['exit_code'] == 0, v
 n = v.get('note') or ''
-assert 'LAST command' in n and 'failed unseen' in n, \
+assert 'failed unseen' in n and 'echo TD30_COMPOUND' in n, \
     f'a semicolon line must be caveated where the number cannot be: {n!r}'
 " || fail "compound-line scope (see above)"
 

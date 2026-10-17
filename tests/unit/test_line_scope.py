@@ -26,24 +26,36 @@ def test_semicolons_inside_quotes_are_data_not_syntax():
     assert line_scope("sh -c 'run; other' && cat log") is not None  # the outer &&
 
 
-def test_semicolon_line_reports_the_last_command():
+def test_semicolon_line_names_the_command_the_code_came_from():
     note = line_scope("deploy.py init; deploy.py build")
-    assert note and "LAST command" in note and "`;`" in note
+    assert "`;`" in note and "failed unseen" in note, note
+    assert "deploy.py build" in note, f"must name the covered stage: {note}"
+    assert "deploy.py init" not in note, "the earlier stage is not the answer"
 
 
-def test_short_circuit_names_no_stage():
-    note = line_scope("a && b")
-    assert note and "names no stage" in note and "`;`" not in note
-    assert "zero means every stage succeeded" in note
+def test_short_circuit_names_the_last_stage():
+    note = line_scope("make && make install")
+    assert "`&&`/`||`" in note and "zero means every stage passed" in note, note
+    assert "make install" in note, f"must name the last stage: {note}"
     note2 = line_scope("a || b")
-    assert note2 and "names no stage" in note2 and "`;`" not in note2
+    assert "`&&`/`||`" in note2 and "`;`" not in note2 and "b" in note2
 
 
 def test_pipeline_reports_the_last_stage():
     note = line_scope("make build 2>&1 | tail -5")
-    assert note and "pipeline" in note
+    assert "pipeline" in note and "tail -5" in note, note
     # `2>&1` is a redirection, not a pipeline, and not a background job:
     assert line_scope("make build > build.log 2>&1") is None
+
+
+def test_split_keeps_quoted_separators_inside_one_segment():
+    from termuse.waiting import split_top_level
+    assert split_top_level("python3 -c 'a; b'") == ["python3 -c 'a; b'"]
+    assert split_top_level("a; b && c | d") == ["a", " b ", " c ", " d"]
+    # `2>&1` must not split, and a trailing `&` leaves nothing behind it:
+    assert len(split_top_level("cmd > out.log 2>&1")) == 1
+    assert split_top_level("cmd &") == ["cmd "]
+    assert "launched, not finished" in line_scope("cmd &")
 
 
 def test_background_job_is_launched_not_finished():
@@ -60,7 +72,8 @@ def test_escaped_separator_does_not_split():
 
 
 def test_newline_separates_too():
-    assert "LAST command" in line_scope("cd /tmp\nls")
+    note = line_scope("cd /tmp\nls")
+    assert "`;`" in note and "ls" in note, note
 
 
 def test_unquoted_blanks_only_quoted_regions():

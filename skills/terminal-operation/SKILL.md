@@ -40,6 +40,10 @@ $TD start -n demo --cmd bash --socket "$SOCK" --width 100 --height 30
 $TD send  -n demo --socket "$SOCK" --type "make build" --key Enter
 $TD wait  -n demo --socket "$SOCK" --done --expect-code 0 --timeout 120
 $TD out   -n demo --socket "$SOCK"          # what it printed, inside a byte budget
+
+# When the step is silent and cannot be re-run safely, chain its proof into the same send:
+$TD send  -n demo --socket "$SOCK" --type "step && cat artifact" --key Enter
+$TD wait  -n demo --socket "$SOCK" --done --expect-code 0        # one verdict: write + evidence
 ```
 
 `--socket NAME` belongs on **every** subcommand, not only on `sessions`; a private socket
@@ -50,10 +54,13 @@ start: `stop` (killing the last session takes the tmux server, and any nested se
 with it).
 
 Two facts that save a call each: **a met `wait` verdict already carries the screen** in
-`evidence.screen` (re-reading after a met wait is usually redundant), and **`trace`'s
-header prints `started=`** — the recording's wall-clock origin — so `run` wrote that file
-versus `check` did is answerable by comparing an mtime to `started + elapsed`, without
-opening `raw.log` yourself.
+`evidence.screen` — the *visible* pane, so in a short pane a growing session can scroll
+the answer off the top; `clear` (not `--history-only`: on a pane with no scrollback it
+reclaims nothing) before a final listing — and **`trace`'s header prints `started=`** —
+the recording's wall-clock origin — so `run` wrote that file versus `check` did is
+answerable by comparing an mtime to `started + elapsed`, without opening `raw.log`
+yourself. A new pane starts in the **launching shell's cwd**, so `pwd && ls` is the
+first send, not a relative path.
 
 ### When the target is a plain CLI, not a TUI
 

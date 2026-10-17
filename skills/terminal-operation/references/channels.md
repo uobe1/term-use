@@ -34,6 +34,10 @@ is literally `default` (`-n default:inner:0.0`).
 - `--type-file PATH` reads the text from a file (final newline stripped) and sends it
   verbatim. Use it the moment your text carries both quote styles — `'"'"'` gymnastics
   are your *shell's* problem, and the pane runs whatever the shell produced.
+- `--type` is passed through **literally**: a backslash stays a backslash, and a `
+`
+  typed as two characters reaches the program as two characters, not a newline. To press
+  Enter, use `--key Enter`; to send a real linefeed byte, use `--hex 0a`.
 - The result carries `offset`: the byte position in `raw.log` where this send's output
   begins. That is what `--done`/`--cmd-done` and `--since-send` scope to.
 - `sent` summarizes what went in — `{text, keys, calls}` (`calls` = tmux invocations, so
@@ -66,8 +70,9 @@ completion** |
 Verdict shape: `{verdict, confidence, conditions[], evidence{screen,…}, context, via,
 channel, advice?, exit_code?, note?}`. Composite verdicts take the weakest member's
 confidence. A `note` on a met `--done` means your line was compound (`;`, `&&`, `|`, `&`):
-the one `exit_code` describes only part of it, and the note says which part. A `;` inside
-quotes is data and never triggers it.
+the one `exit_code` describes only part of it, and the note quotes **which command** the
+number came from (your own last segment, echoed back). A `;` inside quotes is data and
+never triggers it.
 Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
 `"degraded": "unmanaged"`, capped at `heuristic`; `--cmd-done`/`--shell-ready`/`--since-send`/
 `out` refuse with `unmanaged-pane`; `--exit` works and reports `"degraded":
@@ -107,7 +112,9 @@ Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
   send (or the whole session), head+tail with `interior bytes omitted` marked. `--json`
   states `since_offset`, where the window begins, so "the row is not in here" can be told
   apart from "my window starts after it" (an ab8 arm could not tell, and re-verified a
-  non-idempotent step three times). It is the
+  non-idempotent step three times). It is the **unwrapped byte stream**: a long typed
+  command appears whole, whereas a wait's `evidence.screen` shows it broken at the pane
+  width. Both are the pane's truth at different layers — neither rewrites the other.
   *pane*, so it contains your echoed input line and the prompt that follows; a trailing
   prompt with nothing after it means "the program said nothing", which is a result.
   `--json` adds `bytes/truncated/omitted_bytes/redrawn/full_bytes`. When `redrawn` is true

@@ -150,10 +150,14 @@ arrow debounce, `$?` expanded before tmux sees it, kitty key encodings, …). If
 a real-world pitfall, update the skill in the same PR so agents benefit immediately.
 
 The skill is **two-layer and priced per token**: the core `SKILL.md` is what every
-session loads, so it stays short (~150 lines) and carries only what an agent needs
-before acting; `references/*.md` are loaded at the moment the core names them. New
-detail goes into a reference unless it changes a decision; rationale and measurements go
-into the repo docs, not the skill body. Do not state a rule twice.
+session loads, so it stays short (193 lines / 14 KB today, against the 353-line / 26.7 KB
+a5 core that every arm paid) and carries only what an agent needs before acting;
+`references/*.md` are loaded at the moment the core names them. A line earns a place in
+the core only when an arm of the A/B round had to guess or derive it — the ab8 arms
+loaded no reference at all on a plain-CLI task and still rated `doc` 2–3, which is the
+evidence that the split works and that the core should stay this size rather than grow.
+New detail goes into a reference unless it changes a decision; rationale and
+measurements go into the repo docs, not the skill body. Do not state a rule twice.
 
 Is a skill revision actually better? `tests/blind/ab_skill.sh` answers that with agents
 rather than opinion — objective verdict from the fixture's end state, weighted confusion

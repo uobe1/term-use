@@ -1006,6 +1006,8 @@ def cmd_clear(args) -> int:
         return tdscreen.grid_stats(grid)["nonblank_rows"]
 
     before = rows_visible()
+    pane_meta = tmuxio.meta(target)
+    history_before = pane_meta.get("history_size")
     did: list[str] = []
     if not args.history_only:
         # C-l is the keystroke a shell/readline already binds to clear-display:
@@ -1026,6 +1028,15 @@ def cmd_clear(args) -> int:
                           "program repaints on its own or does not bind C-l; "
                           "scrollback is gone. Pass --history-only to avoid "
                           "touching the program's input at all.")
+    elif args.history_only and not history_before:
+        # Measured in the ab8 round: `--history-only` answered rows 17 → 17 and
+        # history_size 0 — it did nothing, and the counts read as if it had. In a
+        # short session everything printed is still ON the screen, so the bill the
+        # skill warns about cannot be paid down this way.
+        result["note"] = ("nothing was reclaimed: this pane has no scrollback at "
+                          "all, so every line it printed is still on-screen and the "
+                          "next capture costs the same bytes. Use `clear` without "
+                          "--history-only (it sends C-l) to wipe the visible screen.")
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

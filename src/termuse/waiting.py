@@ -879,6 +879,37 @@ def unquoted(text: str) -> str:
     return "".join(out)
 
 
+def split_top_level(text: str) -> list[str]:
+    """The commands of a line, split at separators that sit OUTSIDE quotes.
+
+    `unquoted` keeps every character's position, so a separator found in the
+    blanked copy is at the same index in the original. The separators themselves
+    are dropped: a caller naming "the last command" wants the command, not the
+    operator in front of it.
+    """
+    bare = unquoted(text)
+    segs, start, i = [], 0, 0
+    while i < len(bare):
+        ch = bare[i]
+        if bare.startswith("&&", i) or bare.startswith("||", i):
+            span = 2
+        elif ch in ";\n|":
+            span = 1
+        elif ch == "&" and bare[i - 1:i] not in ("<", ">", "&") \
+                and bare[i + 1:i + 2] not in ("&", ">"):
+            span = 1                      # a background job, not `2>&1`
+        else:
+            i += 1
+            continue
+        if text[start:i].strip():
+            segs.append(text[start:i])
+        start = i + span
+        i = start
+    if text[start:].strip():
+        segs.append(text[start:])
+    return segs or [text]
+
+
 def line_scope(text: str | None) -> str | None:
     """What one exit code can honestly claim about this command line.
 
@@ -886,7 +917,9 @@ def line_scope(text: str | None) -> str | None:
     compound line that number belongs to part of it. Saying so is the whole
     point: a strong label quietly covering half a line is the most misleading
     kind of strong evidence, and both arms of the ab_write round asked for it
-    in their own words. Returns None when the line is a single command.
+    in their own words. Two waves then asked for more than the shell rule — they
+    wanted to know *which* command the number came from — so the last segment is
+    quoted back here, in the caller's own text. Returns None for a single command.
     """
     if not text:
         return None
@@ -895,17 +928,19 @@ def line_scope(text: str | None) -> str | None:
     # operator, and `2>&1` is a redirection, not a pipeline or a background job.
     flat = (bare.replace("&&", "@@").replace("||", "@@")
                 .replace(">&", "@").replace("<&", "@"))
+    last = split_top_level(text)[-1].strip()
+    if len(last) > 48:
+        last = last[:45] + "…"
     notes = []
     if ";" in bare or "\n" in bare:
-        notes.append("`;`/newline: the code is the LAST command's, so an earlier "
-                     "one can have failed unseen — the part you care about is "
-                     "proven by evidence.screen, not by this number")
+        notes.append(f"`;`: the number is `{last}` alone — an earlier command on this "
+                     "line can have failed unseen (evidence.screen proves it)")
     if "@@" in flat:
-        notes.append("`&&`/`||`: zero means every stage succeeded; nonzero names "
-                     "no stage, so read evidence.screen for where it stopped")
+        notes.append(f"`&&`/`||`: zero means every stage passed; the number itself is "
+                     f"`{last}` — the last stage that ran")
     if "|" in flat:
-        notes.append("pipeline: the code is the LAST stage's, unless the shell "
-                     "sets pipefail")
+        notes.append(f"pipeline: the number is the last stage's (`{last}`), unless the "
+                     "shell sets pipefail")
     if "&" in flat:
         notes.append("`&`: done means launched, not finished")
     return "; ".join(notes) or None
