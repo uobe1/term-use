@@ -57,9 +57,11 @@ If the agent can only fetch URLs (not local files), use the raw link instead:
 yourself (CLI + skill); the doc is written so an AI agent or a human can follow it
 end-to-end.
 
-**Requirements:** Python **3.14+** (stdlib only) and **tmux 3.x** on `PATH` (developed and
-regression-tested on 3.7c; the [install doc](docs/en/installation.md) lists what each version
-line changes). Pillow optional (screenshots only).
+**Requirements:** Python **3.14+** (stdlib only) and **tmux** on `PATH` — 3.2a minimum,
+**3.8+ recommended**: native command status is what keeps completion facts working through
+ssh and through prompt frameworks that rewrite `PROMPT_COMMAND`. Pillow optional
+(screenshots only); a monospace font ships as a last resort, so `screenshot` works on a
+machine with no fonts.
 
 ## The agent skill
 
@@ -93,6 +95,16 @@ click-ready coordinates; `replay --at 3.5` rebuilds the screen as it was at any
 earlier moment; `clear` reclaims the pane before the next capture costs you
 again; and every observation reports what it cost your context.
 
+**Defaults, decided once.** For waits that is `wait --done`, not `--until`: `--until`
+proves some text is on screen (your own echo can supply it) and caps at `inference`,
+while `--done` proves the command finished and carries its exit code. Use `--until`
+only for a marker you own, and then with `--since-send`. For observation that is the
+text channels (`screen --grep/--find/--element-at`, `out`), with `screenshot` once per
+layout question — pictures are the expensive exception, not the default, even for
+multimodal models. The OSWorld benchmark reports **12.24% for text/a11y observations
+against 5.26% for screenshots** (their numbers, not ours), and stacking image history
+is what failed there.
+
 **Detailed docs:** [docs/en/usage.md](docs/en/usage.md) — the agent-facing usage guide:
 mental model, decision tables, worked examples, common mistakes, red lines.
 
@@ -109,13 +121,11 @@ under `$XDG_STATE_HOME/term-use/<session>/` — `raw.log` (asciicast v2 evidence
 store) and `state.json` (atomic locator/recorder state, with `last_send_offset` as a
 **byte offset** into `raw.log`, so echo can never fake completion).
 
-Key internal guarantees: the recorder is attached **before** the target runs, so a
-program that prints immediately does not lose its first bytes; tmux success is never
-read from the exit code alone (it can fail and exit 0); text/keys never mixed in one
-`send-keys` call; `--hex` split one byte per `-H`; the OSC 133 A/B/C/D state machine
-tolerates chunk boundaries and also reads VSCode's 633; composite verdicts take the
-weakest member's confidence; every failure surfaces as a fixed-code `TDError`,
-single-line JSON, exit code 1.
+Key internal guarantees: the recorder attaches before the target runs (no lost first
+bytes); tmux success means exit 0 *and* clean stderr (it can fail and exit 0); text and
+keys are never mixed in one `send-keys` call; the OSC 133 A/B/C/D scanner tolerates chunk
+boundaries and also reads VSCode's 633; composite verdicts take the weakest member's
+confidence; every failure is a fixed-code `TDError` as single-line JSON, exit 1.
 
 ## Testing
 

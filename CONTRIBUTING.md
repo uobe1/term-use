@@ -92,33 +92,42 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
 
 ### tmux compatibility
 
-tmux is the only hard dependency, and the tool leans on its behavior details
-(`pipe-pane`, `remain-on-exit`, `capture-pane -e/-N/-J/-S`, `display-message -p` formats,
-`send-keys` semantics), so the supported line is stated rather than implied:
+tmux is the only hard dependency and the tool leans on its behavior details, so the
+supported line is stated, not implied. **Recommended: 3.8+** (native command status,
+which is what makes completion facts survive ssh/remote shells and prompt frameworks
+that rewrite `PROMPT_COMMAND`). Minimum: 3.2a, on a self-scanned fallback.
 
-| tmux | what holds |
+| tmux | holds |
 |---|---|
-| 3.2a – 3.7c | the supported baseline; developed and regression-tested on **3.7c** |
-| 3.7 / 3.7a / 3.7b / 3.7c | no drift that matters here: `input_osc_133()` is byte-identical across the patch line, and `capture-pane -F`'s flag vocabulary (`D H O P W X`) is the same. `wait-for` has **no** `-t` timeout and no way to list waiters |
-| 3.8 | adds `pane_command_status` / `_running` / `_duration` / `_start_time` and the `pane-command-started` / `pane-command-finished` / `pane-shell-prompt` hooks, and fixes the `wait-for` client leak (tmux #5614) |
+| 3.2a – 3.7c | everything works via term-use's own `raw.log` scan. The `pane_command_*` group does **not** exist (≤3.7c parses OSC 133 `A`/`C` only and discards `D;<code>`) — and tmux expands *any* unknown format to empty, so `tmuxio.meta()` drops the group when `pane_command_running` comes back empty. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
+| 3.7 / 3.7a / 3.7b / 3.7c | no drift here: `input_osc_133()` is byte-identical, `capture-pane -F` flags (`D H O P W X`) unchanged. `wait-for` has no `-t` and cannot list waiters |
+| 3.8 | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`; fixes the `wait-for` client leak (#5614). term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
 
-Two consequences that have already cost someone a wrong design:
+Measured on 3.8, because the shape of that channel decides how it is used: `running`
+is 0/1 whenever the group exists (so it is the presence probe), `status` stays empty
+until the first `D;<code>` marker reaches the pane, and it is filled by markers from
+**any** program in the pane — including a remote shell's, forwarded through ssh. The
+timestamps have one-second granularity, so a completion is proved by `end_time`
+advancing past the baseline stamped at send time, by a changed code, or by having
+seen `running=1`; when none of those hold, the byte scan answers instead.
 
-- **tmux ≤ 3.7c cannot answer "did the command finish".** Its OSC 133 parser handles only `A`
-  and `C` and discards the exit code in `D;<code>`, so `#{pane_command_status}` is not a fact
-  oracle there — it expands to empty *because the format does not exist*, and tmux expands
-  every unknown format to empty. Any code that does use those formats must version-gate and cap
-  older servers at `heuristic`.
-- **Never trust a zero exit code from tmux.** A client that cannot reach its server can print
-  `access not allowed` / `couldn't create directory … (Not a directory)` and still exit 0
-  (measured on 3.7c). `tmuxio.ok()` — exit 0 *and* clean stderr — is the only success test.
+`running=1` is **not** the answer to "is my command still going", and a test found
+that the hard way: a prompt framework that takes `PROMPT_COMMAND` back kills `D`
+while `PS0` keeps emitting `C`, and a shell blocked on `read` does the same — both
+stick the flag at 1 forever. Only the screen tells those apart (idle prompt vs a
+program asking for input), which is why `shell-protocol-unavailable` reports the
+native reading as evidence and names both readings in its hint instead of choosing
+one for the agent.
 
-Version-dependent behavior we work around rather than assume: `send-keys -H` drops multi-byte
-arguments on 3.x (the CLI splits one byte per `-H`), and `#{pane_dead_signal}` answers a bare
-number on some builds ("9") and a name on others ("KILL") — normalized by `tmuxio.signal_name()`.
+Two traps, both measured:
 
-When you add an assumption about tmux, add the e2e assertion that pins it for the versions you
-claim, and say which line it does *not* hold for.
+- **tmux exits 0 while failing** (`access not allowed`, `couldn't create directory …`):
+  `tmuxio.ok()` — exit 0 *and* clean stderr — is the only success test.
+- **Build variance**: `send-keys -H` drops multi-byte args (CLI splits one byte per `-H`);
+  `#{pane_dead_signal}` answers "9" on some builds, "KILL" on others (`tmuxio.signal_name()`).
+
+New tmux behavior assumptions ship with the e2e assertion that pins them, and say which
+version line they do *not* hold for.
 
 ### Dependencies
 

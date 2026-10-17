@@ -15,16 +15,24 @@ screen snapshot attached, and every observation states what it costs your contex
 This skill teaches a **method for unfamiliar programs** — observe, derive anchors from what the
 program actually paints, confirm with probes — not a table of pre-known screens.
 
-**Three principles**
+**Four rules, with the defaults filled in** — so nobody has to re-litigate this per session.
 
-1. **Wait for state, then act.** Never sleep instead of waiting. After every action, `wait` for
-   the condition you expect before the next one.
-2. **Know what your evidence is worth.** `fact` (shell protocol / pane death) beats `inference`
-   (screen regex — your own echo can fake it) beats `heuristic` (sampling). Take the strongest
-   one the target supports; `wait --done` does that selection for you and says which it used.
-3. **Take the cheapest observation that settles the question.** Text channels are exact and
-   cheap; an image is for the one question text cannot answer — layout — and costs more every
-   time you look at it.
+1. **Wait for state, then act. Default: `wait --done` — not `--until`.** Never sleep
+   instead of waiting. `--done` proves the command finished and carries its exit code;
+   `--until` proves only that some text is on screen, which your own echo can supply. Use
+   `--until` for a marker you own and then with `--since-send`; use `--exit` when the
+   program *is* the pane, `--shell-ready` to ask "is the shell back", `--quiet-ms` for an
+   animated TUI with nothing to anchor on.
+2. **Know what your evidence is worth.** `fact` (terminal protocol / pane death) beats
+   `inference` (screen regex) beats `heuristic` (sampling). `--done` picks the strongest
+   oracle the target supports and names the one it used in `via`; read `advice` before
+   trusting a weak confidence.
+3. **Take the cheapest observation that settles the question. Default: the text channels —
+   not screenshots.** `screen --grep/--find/--element-at` and `out` are exact and cheap.
+   `screenshot` answers the one question text cannot — layout — once per layout question,
+   never as a series and never to decide what to type.
+4. **On failure, read `hint` then `evidence`.** The hint is the tool's diagnosis and
+   usually contains the exact next command.
 
 CLI: `term-use` (installed) or `PYTHONPATH=<repo>/src python3 -m termuse` (only external
 dependency: tmux; Pillow is needed by `screenshot` alone).
@@ -39,11 +47,14 @@ dependency: tmux; Pillow is needed by `screenshot` alone).
 | What did the screen look like a moment ago? | `replay --at` | rebuilt through tmux itself from the recording |
 | How is this frame laid out — where is the dialog, is the box aligned? | `screenshot` (once) | the one question pixels answer better |
 | Is anything on screen at all? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` | separates "empty" from "my input never landed" |
+| Did a command start, and has it finished? | `screen --meta` → `pane_command_running` / `pane_command_status` (tmux 3.8+) | the start half is fact even through ssh; "running" also sticks at 1 when a shell merely waits for input |
 
-Measured, against the intuition that a multimodal model should prefer pictures: in OSWorld,
-agents given **text/a11y observations scored 12.24% vs 5.26% for screenshots**, and stacking
-image history in the context is what failed. So: text by default, one screenshot per layout
-question, and never a running series of them.
+Reported by the OSWorld benchmark — **their measurement, not ours**: agents given
+**text/a11y observations scored 12.24% against 5.26% for screenshots**, and stacking
+image history in the context is what failed. That is why rule 3 reads the way it does.
+Nothing here says the numbers transfer to your model or your tasks: the claim this tool
+makes for itself is narrower — a screenshot costs more context than the text channels
+and answers fewer questions about a terminal.
 
 ## Quick reference
 
@@ -86,6 +97,29 @@ $TD out   -n demo                       # what it printed, budgeted
 been sent yet → pane death when the program *is* the pane → quiet sampling (heuristic, and it
 will say so). The verdict's `via` names the channel and `advice` points at a stronger one when
 the target could support it — read `advice` before you trust a weak confidence.
+
+Two servers can answer the done-marker oracle: term-use's own scan of the recording
+(`via: osc133`) and, on **tmux 3.8+**, the command status tmux keeps for the pane
+(`via: tmux-command-status`; `screen --meta` then carries `pane_command_running`,
+`pane_command_status`, `pane_command_duration`). The native one answers where the
+recording cannot: a pipe-pane that stopped, a prompt framework that took
+`PROMPT_COMMAND` back, or markers forwarded through ssh. On 3.2a–3.7c those keys are
+*absent*, not empty — absence is the version answer.
+
+When the fact channel is **structurally** unable to answer you get
+`shell-protocol-unavailable` instead of a timeout: the pane's foreground is a terminal
+passthrough (`ssh`, `mosh`, nested `tmux`) whose remote markers reach our recording as
+ordinary bytes, or the injected hooks were replaced at startup. It means *change channel*
+(`--until 'regex' --since-send`, or print your own sentinel) and explicitly **not**
+"send the program's quit key" — the shell behind ssh may be idle and healthy.
+
+Read `evidence.native` with it, because that error covers two different situations and
+only you can tell them apart from the screen: a shell **waiting for input** (`read`, a
+password prompt, a menu — send the input it wants) and a completion hook that **died**
+(a prompt framework rewrites `PROMPT_COMMAND` every prompt while `PS0` keeps emitting
+`C`; switch channel). Both leave `pane_command_running: true` and a silent pane, so
+neither the marker stream nor tmux can separate them — do not send a quit key without
+looking at `evidence.screen` first.
 
 A bare `--cmd-done` right after `start` always times out: bash's startup emits a `D` with no
 preceding `C`, which reads as aborted. `--done` handles that case by probing; if you use

@@ -37,6 +37,20 @@ That is the whole loop: **start → send → wait for fact → read the output �
   been sent yet → pane death when the program *is* the pane → quiet sampling
   (heuristic, and it says so). `advice` names a stronger channel when the target
   could support one.
+- The done-marker oracle has two servers. term-use scans its own recording
+  (`via: osc133`); on **tmux 3.8+** the CLI asks tmux first, and when that is
+  what answered you get `via: tmux-command-status` plus a `channel` key naming
+  it. The native answer is the one that survives a stopped recorder, a prompt
+  framework that rewrites `PROMPT_COMMAND`, and markers forwarded through ssh —
+  which is why 3.8+ is the recommended tmux.
+- When no fact channel can answer, that is said out loud: `--cmd-done` /
+  `--shell-ready` / `--done` raise `shell-protocol-unavailable` (the pane's
+  foreground is `ssh`/`mosh`/a nested `tmux`, or the injected hooks were
+  replaced) instead of timing out and hinting at a quit key. `evidence.native`
+  then carries tmux's own reading — but `running: true` does **not** mean "your
+  command is still going": a shell blocked on `read` and a shell whose completion
+  hook was taken over both look like that. `evidence.screen` is what separates
+  them (a program asking for input vs an idle prompt).
 - `--shell-ready` is that probe on its own. After leaving a nested program it
   confirms the shell took input back — a live interactive program swallows the
   probe, and the wait fails with `shell-not-ready` instead of pretending.
@@ -54,11 +68,14 @@ That is the whole loop: **start → send → wait for fact → read the output �
 
 ### Choosing a wait condition
 
+**Default: `--done`.** Every other condition is the answer to a *different* question, and
+reaching for `--until` first is the habit this tool exists to break.
+
 | Situation | Wait with |
 |---|---|
 | Did the thing I just sent finish? what code? | **`--done [--expect-code N]`** — picks the strongest oracle this target supports and reports `via` + `exit_code` |
 | Is the shell ready / back in control? | `--shell-ready` — the `true` probe (fact); timeout → `shell-not-ready` |
-| Did the shell command finish? what code? | `--cmd-done [--expect-code N]` — the OSC 133 channel `--done` uses when it can |
+| Did the shell command finish? what code? | `--cmd-done [--expect-code N]` — the done-marker channel `--done` uses (term-use's scan, or tmux's own status on 3.8+) |
 | Did the program exit or crash? | `--exit [--expect-code N]` (signal name in evidence) |
 | A known output marker appears | `--until 'regex'` (`--scrollback N` extends history) |
 | …and it must be *new* output, not text left on screen | `--until 'regex' --since-send` |
@@ -120,8 +137,19 @@ off-by-one.
 
 ### Observing: text, output, history, image
 
+**Default: the text channels.** `screenshot` is for the one question text cannot answer —
+layout — and it is the most expensive thing you can put in context. Not invented: the
+OSWorld benchmark reports **12.24% for text/a11y observations against 5.26% for
+screenshots**, and it was the accumulated image history that broke them (their
+measurement, not ours — treat it as direction, not as a number for your model). So one
+picture per layout question, never a series, and never to decide what to type.
+
 ```bash
 $TD screen -n demo --meta                          # cursor, modes, history, blank, stall signals
+#    on tmux 3.8+ also pane_command_running / pane_command_status / pane_command_duration:
+#    "a command started and has not finished" is fact there, even through ssh — but
+#    running:true also describes a shell merely waiting for input, so read
+#    evidence.screen before acting on it. Absent (not empty) on 3.2a–3.7c.
 $TD screen -n demo --runs                          # SGR attribute runs (token-cheap)
 $TD screen -n demo --grep --fg red                 # attribute search (flag, not a text grep)
 $TD screen -n demo --grep --attr reverse           # e.g. locate a menu's highlighted row
@@ -154,10 +182,11 @@ character count. Cells carry `w`, and the reserved half appears as a `pad` stub.
 
 **Which channel.** Text channels are exact and cheap; the image channel answers
 the one question they cannot — *how is this frame laid out* — and costs more every
-time you look at it. Measured against the intuition that a multimodal model should
-prefer pictures: in OSWorld, agents on text/a11y observations scored 12.24% vs
-5.26% on screenshots, and stacking screenshot history is what degraded. So: text
-by default, one screenshot per layout question, never a running series.
+time you look at it. Against the intuition that a multimodal model should prefer
+pictures, the OSWorld benchmark reports agents on text/a11y observations scoring
+12.24% versus 5.26% on screenshots, with stacking screenshot history what degraded
+there (their numbers, not ours). So: text by default, one screenshot per layout
+question, never a running series.
 
 **Every observation states its cost.** JSON results carry a `context` block —
 `bytes` (exact), `est_tokens` + `method` (an estimate: `bytes/4` for text,

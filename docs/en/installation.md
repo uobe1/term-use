@@ -21,7 +21,7 @@ Install **both**. There are two ways to do it — pick whichever fits.
 | Component | Version | Why |
 |---|---|---|
 | Python | **3.14+** | the development and E2E baseline; `requires-python` in `pyproject.toml` enforces it |
-| tmux | **3.2a – 3.8** | the service side. Developed and regression-tested on **3.7c**; see the version notes below |
+| tmux | **3.2a – 3.8+** | the service side. The E2E suite runs on **both 3.7c and 3.8**; 3.8+ is recommended — see the version notes below |
 | Pillow | any current release | optional. Only `screenshot` needs it; every other command is Pillow-free |
 
 Check what you have:
@@ -40,9 +40,9 @@ through tmux's own interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
 
 | Your tmux | What that means here |
 |---|---|
-| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux |
+| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux, so a stopped recorder or a prompt framework that rewrites `PROMPT_COMMAND` costs the fact channel |
 | 3.7 / 3.7a / 3.7b / 3.7c | no difference that matters — the OSC 133 handling and `capture-pane -F` flags are identical across the patch line |
-| 3.8 or newer | additionally exposes `pane_command_status` and command hooks; term-use does not depend on them, so nothing changes for you |
+| 3.8 or newer | **recommended.** tmux parses the markers itself, so `wait --done` has a second fact source (`via: tmux-command-status`) that survives ssh, a clobbered `PROMPT_COMMAND` and a dead recorder, and `screen --meta` answers "is a command running?" as a fact (`pane_command_running`). Everything else is the same |
 | older than 3.2 | unsupported: `capture-pane -e` attribute fidelity and `send-keys -H` byte handling are not reliable there |
 
 term-use has **zero Python dependencies**. tmux is an external binary, not a
