@@ -78,6 +78,7 @@ Two measured traps, whatever your version:
 | `XDG_STATE_HOME` | where each session's `raw.log` + `state.json` live. Must be the **same value** for `start` and every later command, or you get `session-missing` with a hint about exactly this |
 | `TMUX_TMPDIR` | where tmux looks for its sockets. An inherited value pointing somewhere that does not exist here (e.g. another device's Termux prefix on a non-Android box) makes tmux fail with rc 0 and a stderr line — which is why `--socket NAME` plus a directory you own is the default advice |
 | `TERM_USE_CONTEXT_BUDGET` | retunes the over-budget warning threshold (default 2000 tokens of est) |
+| `TERM_USE_SENTINEL` | `0` stops `send` appending term-use's completion sentinel to a line in a shell that emits no OSC 133 of its own. With it off, such a pane has no fact channel at all: `--done` falls back to sampling and `--cmd-done`/`--shell-ready` refuse |
 | `TERM_USE_DISABLE_IMAGE` | `1` denies the image channel (`screenshot`, `replay --format png`) with `pillow-missing`, for text-only testing |
 | `TERM_USE_FG` / `TERM_USE_BG` | default colors of the rendered picture |
 | `TERM_USE_FONT` | one face, by file |
