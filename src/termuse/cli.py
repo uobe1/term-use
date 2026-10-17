@@ -63,6 +63,36 @@ def load_state_or_none(session: str) -> dict | None:
         return None
 
 
+def assert_recorded_pane(target: tmuxio.Target, state: dict | None) -> None:
+    """Refuse to answer for one pane using another pane's evidence.
+
+    `start` records the pane it made (`%N` in state.json) while
+    `-n NAME:1.0` addresses whichever pane the caller names — and every fact
+    term-use reports (raw.log markers, `last_send_offset`, the recorder) belongs
+    to the recorded one. Reported as `unmanaged-pane` because the obligation is
+    identical: no records describe this pane, so facts refuse and the screen
+    channels still work.
+    """
+    if state is None or not state.get("pane_id"):
+        return
+    res = tmuxio.tmux("display-message", "-p", "-t", target.to_arg(), "-F",
+                      "#{pane_id}", socket=target.socket)
+    if not tmuxio.ok(res):
+        return            # a bad target is the caller's error to raise, not here
+    actual = res.stdout.strip()
+    if actual and actual != state["pane_id"]:
+        raise TDError(
+            "unmanaged-pane",
+            f"pane {target.to_arg()!r} resolves to {actual}, but session "
+            f"{target.session!r}'s records belong to {state['pane_id']}",
+            hint="the recording, last_send_offset and OSC 133 markers describe "
+                 "the pane `start` made, so nothing about it can be proved from "
+                 "this one: address the session without a window/pane suffix "
+                 "(`-n NAME`), or start this pane with `term-use start` as well",
+            evidence={"addressed_pane": actual,
+                      "recorded_pane": state["pane_id"]})
+
+
 def cmd_sessions(args) -> int:
     res = tmuxio.tmux("list-sessions", "-F",
                       "#{session_name}|#{session_windows}|#{session_attached}",
@@ -244,6 +274,10 @@ def stamp_native_baseline(target, state: dict) -> None:
     try:
         m = tmuxio.meta(target)
     except TDError:
+        # No reading means no baseline: leaving the *previous* send's baseline in
+        # place lets `_native` compare against it and hand back the command
+        # before this one as a fresh fact — a stale claim is worse than none.
+        state.pop("native_baseline", None)
         return
     if "pane_command_running" not in m:
         state.pop("native_baseline", None)  # no native channel: claim nothing
@@ -267,11 +301,17 @@ def cmd_send(args) -> int:
         raise TDError("invalid-arguments", f"--delay must be >= 0 (got {delay})")
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
+    assert_recorded_pane(target, state)
     # Records only for managed sessions: creating a V2Writer would mkdir a
     # state dir as a side effect — unmanaged panes (nested tmux) must not
     # accumulate bogus record dirs.
     writer = records.V2Writer(target.session) if state else None
-    offset = writer.size() if writer else 0  # where output caused by this send starts
+    # Where output caused by this send starts — plus whether the recorder had
+    # already caught up when that line was drawn. The second answer is what lets
+    # `wait --done` attribute a marker to this send instead of to whatever the
+    # previous command left in flight (see CmdDone._barrier).
+    offset, settled = (records.drain_offset(target.session)
+                       if writer else (0, True))
     if state is not None:
         stamp_native_baseline(target, state)
     sent_text = "".join(args.type or [])
@@ -303,6 +343,7 @@ def cmd_send(args) -> int:
         events += rep
     if writer is not None:
         state["last_send_offset"] = offset
+        state["last_send_settled"] = settled
         writer.state = state
         writer.save_state()
         if sent_text and tdinput.echo_broken(target.session, offset, sent_text):
@@ -334,7 +375,7 @@ def cmd_fix_tty(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = records.read_state(target.session)
     writer = records.V2Writer(target.session)
-    offset = writer.size()
+    offset, settled = records.drain_offset(target.session)
     stamp_native_baseline(target, state)
     # C-u clears whatever half-typed line is sitting in the shell buffer,
     # so "stty sane" can never glue onto leftover input. Order matters:
@@ -343,6 +384,7 @@ def cmd_fix_tty(args) -> int:
     events += tdinput.send(target, ["stty sane"], ["Enter"], [])
     writer.append("i", events)
     state["last_send_offset"] = offset
+    state["last_send_settled"] = settled
     writer.state = state
     writer.save_state()
     print(json.dumps({"ok": True, "fixed": "stty sane"}, ensure_ascii=False))
@@ -527,7 +569,21 @@ def _exit_code_of(conditions: list) -> int | None:
 def cmd_wait(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
+    assert_recorded_pane(target, state)
     writer = records.V2Writer(target.session) if state else None
+    if state is not None and writer is not None \
+            and not state.get("shell_integration") \
+            and records.detect_shell_integration(target.session):
+        # `start` can only record what it injected itself. fish >= 4.0 emits the
+        # markers on its own, and a shell may carry someone else's integration
+        # (VSCode's 633, WezTerm's 133). --done used to call those targets
+        # "quiet" and advise restarting with --cmd bash while --cmd-done on the
+        # same pane answered fact: believe the stream, and say it early enough
+        # that even an --until verdict's advice stops sending people to a shell
+        # they are already running.
+        state["shell_integration"] = True
+        writer.state = state
+        writer.save_state()
 
     def capture(scrollback: int) -> str:
         flags = ("-S", str(-scrollback)) if scrollback else ()
@@ -548,11 +604,12 @@ def cmd_wait(args) -> int:
         """The `true` probe (the skill's standard loop, internalized): text
         and Enter are separate send-keys calls (the split-send red line)."""
         require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
-        probe_offset = writer.size()
+        probe_offset, probe_settled = records.drain_offset(target.session)
         stamp_native_baseline(target, state)
         probe = tdinput.send(target, ["true"], ["Enter"], [])
         writer.append("i", probe)
         state["last_send_offset"] = probe_offset
+        state["last_send_settled"] = probe_settled
         writer.state = state
         writer.save_state()
         conditions.append(waiting.ShellReady(target.session))
@@ -623,6 +680,20 @@ def cmd_wait(args) -> int:
         elif oracle == "pane-exit":
             conditions.append(waiting.ExitCondition(args.expect_code, managed=True))
         else:
+            if args.expect_code is not None:
+                # The probe oracle above refuses --expect-code, and quietly
+                # dropping it here was the other half of the same lie: a wait
+                # that cannot read an exit code must not accept a demand for one.
+                raise TDError(
+                    "invalid-arguments",
+                    f"--done fell back to quiet sampling on this target, which "
+                    f"has no exit code to compare against {args.expect_code}",
+                    hint="give the pane a completion oracle: start with --cmd "
+                         "bash or --cmd zsh (injected OSC 133), run fish >= 4.0 "
+                         "(it emits markers itself), or put the pane on tmux 3.8+ "
+                         "so term-use can ask tmux's own command status; if none "
+                         "of those, drop --expect-code and read the exit code you "
+                         "printed yourself with `out`")
             conditions.append(waiting.QuietCondition(
                 target.session, waiting.DEFAULT_DONE_QUIET_MS,
                 managed=(oracle == "quiet")))
@@ -690,9 +761,12 @@ def cmd_wait(args) -> int:
                     "pane)")
             if any(getattr(c, "silent_unproven", False) for c in conditions):
                 verdict["note"] = (verdict.get("note", "") +
-                                   " Nothing has been written since your send, "
-                                   "so this settle rests on the screen having "
-                                   "been still, not on any output.").strip()
+                                   " Nothing that paints the screen has arrived "
+                                   "since your send (titles, clipboard reports and "
+                                   "OSC 133 markers were written but are not "
+                                   "output), so this settle rests on the screen "
+                                   "having been still, not on any visible "
+                                   "output.").strip()
             if answered:
                 # Name the channel that actually answered: on tmux 3.8 the
                 # native command status often beats our own byte scan to a
@@ -706,18 +780,20 @@ def cmd_wait(args) -> int:
                 verdict["via"] = via
             if advice:
                 verdict["advice"] = advice
+            code = _exit_code_of(conditions)
             if args.done:
                 # The exit code belongs at the top level for --done: the whole
                 # question an agent is asking is "did it finish, and how".
-                verdict["exit_code"] = _exit_code_of(conditions)
-                if verdict["exit_code"] is not None and managed:
-                    # …and on a compound line it owes an explanation of *which
-                    # part* of the line that number describes.
-                    scope = waiting.line_scope(records.last_sent_text(
-                        target.session, (state or {}).get("last_send_offset", 0)))
-                    if scope:
-                        verdict["note"] = (f"{verdict['note']} {scope}"
-                                           if verdict.get("note") else scope)
+                verdict["exit_code"] = code
+            if code is not None and managed and (args.done or args.cmd_done):
+                # …and on a compound line that one number owes an explanation of
+                # *which part* of the line it describes. --cmd-done is the same
+                # fact from the same single number, so it gets the same caveat.
+                scope = waiting.line_scope(records.last_sent_text(
+                    target.session, (state or {}).get("last_send_offset", 0)))
+                if scope:
+                    verdict["note"] = (f"{verdict['note']} {scope}"
+                                       if verdict.get("note") else scope)
             print(json.dumps(verdict, ensure_ascii=False))
             tdbudget.warn(verdict_ctx, target.session)
             return 0

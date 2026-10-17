@@ -19,6 +19,56 @@ CONFIDENCE_ORDER = ("fact", "inference", "heuristic")  # strong -> weak
 # What `wait --done` settles on when the target supports no stronger oracle.
 DEFAULT_DONE_QUIET_MS = 700
 
+# OSC sequences that can change what the grid shows. Everything else an OSC can
+# carry — window/icon name (0/1/2), cwd (7), clipboard (52), the 133/633 command
+# markers, desktop notifications (9/99/777) — paints zero cells. Counting those
+# as output activity made `--quiet-ms` never settle for a program that animates
+# only its title bar: an ink TUI burned a full 240 s timeout on `⠏ 将 note.txt…`
+# frames while its screen stayed byte-identical.
+PAINTING_OSC = frozenset({4, 10, 11, 12, 104, 110, 111, 112, 118, 119})
+
+
+def _osc_end(text: str, i: int) -> int | None:
+    """Index just past the OSC sequence at `text[i:] == ESC ]`, or None if it
+    has not arrived in full yet. A bare ESC (no `\\`) abandons the sequence."""
+    m = i + 2
+    while m < len(text):
+        c = text[m]
+        if c == "\x07":
+            return m + 1
+        if c == "\x1b":
+            return m + 2 if text.startswith("\x1b\\", m) else m
+        m += 1
+    return None
+
+
+def cell_visible(text: str, carry: str = "") -> tuple[str, str]:
+    """Split pane bytes into (what can reach the grid, an OSC still arriving).
+
+    `carry` is the open tail of an OSC sequence from the previous chunk, so a
+    title split across two o-events is still recognized as a title rather than
+    counted as paint because its terminator has not landed yet.
+    """
+    buf = carry + text
+    kept: list[str] = []
+    i = 0
+    while True:
+        j = buf.find("\x1b]", i)
+        if j < 0:
+            kept.append(buf[i:])
+            return "".join(kept), ""
+        kept.append(buf[i:j])
+        end = _osc_end(buf, j)
+        if end is None:
+            return "".join(kept), buf[j:]
+        payload = buf[j + 2:end]
+        if payload.endswith("\x1b\\"):
+            payload = payload[:-2]
+        code = payload.split(";", 1)[0]
+        if code.isdigit() and int(code) in PAINTING_OSC:
+            kept.append(buf[j:end])       # this one repaints: it is activity
+        i = end
+
 
 class Condition:
     label: str = "condition"
@@ -27,6 +77,11 @@ class Condition:
     # (e.g. "unmanaged" — no state.json/raw.log, so part of the machinery
     # cannot run). None on fully-equipped waits.
     degraded: str | None = None
+    # What this condition itself answered on its last evaluation. The
+    # composite's verdict is a different number: an AllOf that timed out
+    # because `--until` never matched still has to be able to show that the
+    # cmd-done member DID match (and with which exit code).
+    last_met: bool | None = None
 
     def evaluate(self, ctx) -> bool:
         raise NotImplementedError
@@ -153,27 +208,71 @@ class AllOf(Condition):
         self.confidence = CONFIDENCE_ORDER[weakest]
 
     def evaluate(self, ctx) -> bool:
-        result = all(c.evaluate(ctx) for c in self.conditions)
+        ok = True
+        for c in self.conditions:
+            met = c.evaluate(ctx)
+            c.last_met = met
+            if not met:
+                ok = False
+                break
         self._recompute()
-        return result
+        return ok
 
     def to_json(self, met: bool) -> dict:
+        # Members report what THEY answered, not the composite's verdict: the
+        # timeout evidence that hides a matched child (and blanks its exit code)
+        # is the reason an agent cannot tell which half of an AND is lying.
         return {**super().to_json(met),
-                "conditions": [c.to_json(met) for c in self.conditions]}
+                "conditions": [c.to_json(met if c.last_met is None
+                                         else c.last_met)
+                               for c in self.conditions]}
+
+
+def _norm_ws(text: str) -> str:
+    """Collapse every whitespace run to one space, so an echo can be matched
+    against typed text without betting on how the line editor repainted it."""
+    return " ".join(str(text).split())
+
+
+def echo_barrier(session: str, offset: int, text: str) -> int | None:
+    """Byte position of the first event at/after `offset` that carries our echo.
+
+    tmux serializes a pane's output stream, and the tty echoes injected input
+    into that same stream at injection time. So the previous command's bytes sit
+    *before* our own echo in raw.log however late the recorder delivered them:
+    that order is causality, where a file-size offset is only a guess. Returns
+    None while the echo has not reached the recording yet — the caller polls, so
+    it turns into a barrier on the next pass.
+    """
+    probe = _norm_ws(text)
+    if len(probe) < 3:
+        return None
+    window = ""
+    for _ts, code, data, pos in records.events_since(session, offset):
+        if code != "o" or not isinstance(data, str):
+            continue
+        window = (window + data)[-32768:]
+        if probe in _norm_ws(screen_mod.visible_text(window)):
+            return pos
+    return None
 
 
 class CmdDone(Condition):
     """OSC 133 D marker after a C, scanned from raw.log since the last send.
 
     fact confidence: the exit code comes from the terminal protocol, not from
-    screen text. Expect-code mismatch fails immediately (never waits out the
-    timeout). Requires shell integration recorded in state.json.
+    screen text. A marker answers only *if this send caused it* — see
+    `_barrier` — and an expected-code mismatch fails immediately (never waits out
+    the timeout). Requires shell integration recorded in state.json.
 
     On tmux 3.8+ there is a second fact source for the same event: tmux parses
     the markers itself and answers `pane_command_status`/`_running`, which
     `--cmd-done` consults first because one display-message beats replaying the
-    recording. It also answers where the scan cannot: markers forwarded through
+    recording, and because it binds a completion to a *start time* instead of to
+    a file position. It also answers where the scan cannot: markers forwarded through
     ssh, or emitted by a shell whose startup files took PROMPT_COMMAND back.
+    That channel is the supported one; the byte scan is what a ≤3.7c server is
+    left with, and it is why `--done` sometimes has to degrade.
     """
     label = "cmd-done"
     confidence = "fact"
@@ -188,6 +287,35 @@ class CmdDone(Condition):
     def _stream(self) -> str:
         state = records.read_state(self.session)
         return records.stream_since(self.session, state.get("last_send_offset", 0))
+
+    def _barrier(self, state: dict, offset: int) -> int | None:
+        """The position a `C` must clear to be this send's, or None if unprovable.
+
+        Two bindings, in order of how much they prove:
+
+        1. the echo of what we typed (see `echo_barrier`) — tmux serializes the
+           pane's output stream, so the previous command's bytes are ordered
+           before our echo however late the recorder delivered them. This is what
+           survives a recorder that is not merely behind but stopped outright: a
+           frozen recorder writes nothing, so "the file stopped growing" proves
+           nothing at all;
+        2. `send` measured that the recording was quiet — the fallback for a
+           keys-only send, which has nothing to echo. It is a heuristic, not a
+           proof: a pane whose recorder is paused looks identical to an idle one.
+
+        Neither holds means the window contains markers belonging to an unknown
+        command. Then a `fact` would be a guess about someone else's exit code,
+        which is what this condition was measured doing on tmux 3.7c. The caller
+        polls, so a missing echo heals once the echo lands.
+        """
+        typed = records.last_sent_text(self.session, offset)
+        if typed:
+            pos = echo_barrier(self.session, offset, typed)
+            if pos is not None:
+                return pos
+        if state.get("last_send_settled"):
+            return offset
+        return None
 
     def _mismatch(self, code: int, ctx) -> None:
         raise osc133.mismatch_error(
@@ -224,8 +352,11 @@ class CmdDone(Condition):
         if base_start is not None and start is not None and start <= base_start:
             # tmux is still reporting the command that was running when we
             # stamped: it started no later than that one, so it cannot be ours.
-            # Same class as the byte channel's lag race, and the byte scan below
-            # is the precise answer when this one cannot give it.
+            # Measured on 3.8 — `running` drops 1→0 with the OLD start_time the
+            # moment a busy shell finishes, so without this guard the fresh
+            # `end_time` below is the previous command's completion reported as a
+            # fact about ours. Same class as the byte channel's lag race, and the
+            # barrier-gated scan is the precise answer when this cannot give it.
             return None
         if (m.get("pane_command_end_time") or 0) > (base.get("end_time") or 0):
             return code
@@ -235,11 +366,11 @@ class CmdDone(Condition):
 
     def evaluate(self, ctx) -> bool:
         """Replay the full o-stream through the state machine, then accept
-        the newest done/aborted event only if it was emitted after the last
-        send (byte position >= last_send_offset). Full replay keeps C-marker
-        continuity: the C of a long-running command may sit far behind the
-        scan start."""
+        the newest done/aborted event only if this send can be shown to have
+        caused it. Full replay keeps C-marker continuity: the C of a long-running
+        command may sit far behind the scan start."""
         state = records.read_state(self.session)
+        self.degraded = None
         ncode = self._native(ctx, state)
         if ncode is not None:
             self.exit_code = ncode
@@ -269,18 +400,19 @@ class CmdDone(Condition):
         # A done is never masked by a later stray marker: shells emit more than
         # one D per prompt (an integration hook plus the user's own), and the
         # trailing one carries no command.
-        #
-        # The C must sit in this send's window too. `send` takes its offset from
-        # the recording's size, and the recorder lags the pane: send while the
-        # previous command is still running (or while the box is loaded) and its
-        # C *and* D both land after that offset, so a position test on the D
-        # alone answers for the wrong command — measured on a loaded machine,
-        # where `--done` reported a met `fact` two seconds into a 12-second
-        # sleep. Requiring the authorizing C to arrive after the offset excludes
-        # markers opened before this send and keeps every legitimate case: a
-        # command always starts after the bytes that asked for it.
         if last_done is None or last_done[1] < offset or last_done[2] is None \
                 or last_done[2] < offset:
+            return False
+        # Position inside the window is necessary and not sufficient. `send`
+        # takes its offset from the recording's size, and the recorder lags the
+        # pane: send while the shell is busy (or while the box is loaded) and the
+        # previous command's C *and* D both land after that offset — measured on a
+        # loaded machine, where `--done` reported a met `fact` two seconds into a
+        # 12-second sleep. So the C has to clear a barrier this send caused: a
+        # drained recording, or the echo of the text we typed (see `_barrier`).
+        barrier = self._barrier(state, offset)
+        if barrier is None or last_done[2] < barrier:
+            self.degraded = "unattributed-marker"
             return False
         code_ = last_done[0]
         del last_abort  # informative only; completion is already proven
@@ -391,6 +523,11 @@ def choose_done_oracle(state: dict | None) -> str:
     An oracle is named only when its evidence actually exists — the whole
     point of --done is that the agent does not have to know what the target
     supports, and it must never be told "fact" by a lucky screen scrape.
+    The decision stays a pure function of `state`, so callers carry the
+    burden of folding in what the *stream* proved: `cmd_wait` re-reads
+    `detect_shell_integration()` and persists it before calling this, which
+    is how fish >= 4.0 and someone else's OSC 633 integration stop being
+    offered "quiet" plus advice to restart in a shell they are already in.
     """
     if state is None:
         return "quiet-unmanaged"          # no records: screen stability only
@@ -528,10 +665,11 @@ class QuietCondition(Condition):
     """Animation-immune stability (heuristic).
 
     Two independent gates:
-    1. Output activity: the raw o-stream's last event must be older than
-       the quiet interval (immune to screen-content resonance, where a
-       cyclic animation happens to repaint identical frames at sampling
-       time).
+    1. Output activity: the raw o-stream's last *cell-reaching* write must be
+       older than the quiet interval (immune to screen-content resonance, where
+       a cyclic animation happens to repaint identical frames at sampling time).
+       Bytes that paint nothing — window titles, OSC 133 markers, clipboard and
+       notification reports — do not hold this gate open; see `cell_visible`.
     2. Screen stability: (screen, cursor_x/y, alternate_on, history_size)
        must be identical across two samples spaced >= interval apart.
 
@@ -547,7 +685,8 @@ class QuietCondition(Condition):
         self.interval = max(ms / 1000, 0.25)  # sampling floor: 250ms
         self._last = None
         self._open_2026 = 0
-        self._last_o_ts = None  # elapsed of the newest o-event
+        self._last_o_ts = None  # elapsed of the newest o-event that can paint
+        self._osc_carry = ""    # an OSC sequence split across two o-events
         self._scan_offset = 0
         self._tail = ""
         self.silent_unproven = False
@@ -585,11 +724,15 @@ class QuietCondition(Condition):
             return
         text = ""
         for ts, code, data, pos in records.events_since(self.session, self._scan_offset):
-            if code == "o" and isinstance(data, str):
-                self._last_o_ts = ts
-                if pos >= self._send_offset:
-                    self._saw_output = True
-                text += data
+            if code != "o" or not isinstance(data, str):
+                continue
+            painted, self._osc_carry = cell_visible(data, self._osc_carry)
+            if not painted:
+                continue          # a title, a cwd report, a marker: zero cells
+            if pos >= self._send_offset:
+                self._saw_output = True
+            self._last_o_ts = ts
+            text += painted
         self._scan_offset = size
         buf = self._tail + text
         for i in range(len(buf) - 7):
@@ -935,9 +1078,15 @@ def line_scope(text: str | None) -> str | None:
     if ";" in bare or "\n" in bare:
         notes.append(f"`;`: the number is `{last}` alone — an earlier command on this "
                      "line can have failed unseen (evidence.screen proves it)")
-    if "@@" in flat:
-        notes.append(f"`&&`/`||`: zero means every stage passed; the number itself is "
+    if "&&" in bare:
+        notes.append(f"`&&`: zero means every stage passed; the number itself is "
                      f"`{last}` — the last stage that ran")
+    if "||" in bare:
+        # A zero here is the opposite claim: the *earlier* stage already
+        # succeeded and this one never ran, so it cannot be reported as if it
+        # had a code of its own.
+        notes.append(f"`||`: zero means an earlier stage already succeeded and "
+                     f"`{last}` may never have run; a non-zero is `{last}`")
     if "|" in flat:
         notes.append(f"pipeline: the number is the last stage's (`{last}`), unless the "
                      "shell sets pipefail")
@@ -975,6 +1124,16 @@ def timeout_hint_for(cond: "Condition", busy: bool = False) -> str:
                 "waiting, or read evidence.screen: if the program is asking for "
                 "input, send that input. Do not loosen --until on a running "
                 "command, and do not send a quit key without looking.")
+    members = (cond.conditions if isinstance(cond, AllOf) else [cond])
+    if any(getattr(c, "degraded", None) == "unattributed-marker" for c in members):
+        return ("a completion marker did land inside this send's window, but nothing "
+                "in the recording binds it to this send — the recorder was behind "
+                "when the offset was drawn, so that code belongs to the command "
+                "before yours and reporting it would be a guess. Run the wait again "
+                "(the echo of your line usually lands within a second and settles the "
+                "binding), type the command with --type rather than sending bare "
+                "keys, or ask the shell directly with --shell-ready. This is not "
+                "'still running', and it is not a quit key.")
     return timeout_hint(cond)
 
 

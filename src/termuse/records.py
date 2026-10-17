@@ -69,6 +69,38 @@ def stream_since(session: str, offset: int) -> str:
                    if code == "o" and isinstance(data, str))
 
 
+def drain_offset(session: str, settle_s: float = 0.05,
+                 timeout_s: float = 0.6) -> tuple[int, bool]:
+    """Where the recording ends right now, and whether the recorder had caught up.
+
+    `send` needs a byte position that marks "nothing before this belongs to what
+    I am about to cause". The file size is that position only if pipe.py has
+    already flushed what the pane emitted *before* the injection — and it
+    usually has not: the recorder lags the pane, so a just-finished command's
+    trailing markers can land inside the next command's window.
+
+    Two consecutive equal size reads mean the recorder is quiet, which is the
+    strongest statement available on a server without 3.8's command tracking. A
+    stream still growing at `timeout_s` (a spinner, a build) returns the size it
+    reached plus False: the caller then knows its own offset is not trustworthy
+    and must find another way to bind the marker to the send, or not claim fact.
+    """
+    path = session_dir(session) / "raw.log"
+    deadline = time.monotonic() + timeout_s
+    last = -1
+    while True:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return 0, True          # no recording: there is nothing to lag behind
+        if size == last:
+            return size, True
+        if time.monotonic() >= deadline:
+            return size, False
+        last = size
+        time.sleep(settle_s)
+
+
 def header(session: str) -> dict | None:
     """The v2 header line (carries the wall-clock timestamp the elapsed
     seconds are measured from), or None when there is no recording."""

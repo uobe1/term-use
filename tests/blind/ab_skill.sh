@@ -90,10 +90,49 @@ esac
 install_skill() {   # $1 = arm, $2 = dest dir
   mkdir -p "$2"
   case "$1" in
-    old) git -C "$ROOT" show "$OLD_SKILL_REF" > "$2/SKILL.md" ;;
+    old)
+      # `git show <ref> > SKILL.md` truncates the destination *before* git runs,
+      # so a bad ref leaves a 0-byte baseline that every later stage measures as
+      # "the old skill". Resolve the ref and the path first, write aside, move
+      # into place only once the file is non-empty.
+      ref="${OLD_SKILL_REF%%:*}"; path="${OLD_SKILL_REF#*:}"
+      git -C "$ROOT" rev-parse --verify "${ref}^{commit}" >/dev/null || {
+        echo "OLD_SKILL_REF: no such commit '$ref' (from $OLD_SKILL_REF)" >&2; exit 2; }
+      git -C "$ROOT" cat-file -e "${ref}:${path}" || {
+        echo "OLD_SKILL_REF: '$path' is not in '$ref' — that path only exists on the" >&2
+        echo "line that has it; pick a ref whose tree carries the file (see:" >&2
+        echo "  git -C $ROOT ls-tree --name-only '$ref' skills/)" >&2; exit 2; }
+      git -C "$ROOT" show "$OLD_SKILL_REF" > "$2/.SKILL.md.tmp" || {
+        rm -f "$2/.SKILL.md.tmp"; echo "OLD_SKILL_REF: git show $OLD_SKILL_REF failed" >&2; exit 2; }
+      [ -s "$2/.SKILL.md.tmp" ] || {
+        rm -f "$2/.SKILL.md.tmp"
+        echo "OLD_SKILL_REF: $OLD_SKILL_REF is empty — refusing to score against a 0-byte baseline" >&2; exit 2; }
+      mv "$2/.SKILL.md.tmp" "$2/SKILL.md" ;;
     new) cp -r "$ROOT/skills/terminal-operation/." "$2/" ;;
     *) echo "unknown arm: $1" >&2; exit 2 ;;
   esac
+}
+
+require_arm_dir() {   # $1 = the directory `prepare` made for one arm
+  [ -n "$1" ] || { echo "score/archive: give the arm directory (prepare made it)" >&2; exit 2; }
+  [ -d "$1" ] || { echo "score/archive: '$1' is not a directory" >&2; exit 2; }
+  [ -d "$1/skill" ] || [ -d "$1/app" ] || {
+    echo "score/archive: '$1' holds neither skill/ nor app/, so it is not an arm dir." >&2
+    echo "A wrong path here does not fail: score falls through to verdict=NO_ATTEMPT and" >&2
+    echo "archive copies nothing, so an empty or misnamed arm reads exactly like a real" >&2
+    echo "run that did nothing. Check the path with: ls '$1'" >&2
+    exit 2; }
+}
+
+require_report() {   # $1 = file (or directory) holding one arm's report text
+  [ -n "$1" ] || { echo "confusion: give the report file, or a directory of them" >&2; exit 2; }
+  [ -e "$1" ] || { echo "confusion: $1 does not exist" >&2; exit 2; }
+  if [ -d "$1" ]; then
+    [ -n "$(find "$1" -maxdepth 1 -type f -size +1c -print -quit)" ] || {
+      echo "confusion: $1 holds no non-empty file" >&2; exit 2; }
+  elif [ ! -s "$1" ]; then
+    echo "confusion: $1 is empty" >&2; exit 2
+  fi
 }
 
 prompt_todo() {
@@ -194,6 +233,7 @@ EOF
 confusion)
   # $dir = a file (or directory) holding the arm's report text. The arithmetic is
   # here so the model never computes its own composite.
+  require_report "$dir"
   python3 - "$dir" <<'PY'
 import os, re, sys
 
@@ -232,6 +272,7 @@ PY
 
 score)
   # $dir = the arm dir; $extra = the arm's $XDG_STATE_HOME/term-use, when known
+  require_arm_dir "$dir"
   case "$TASK" in
     todo)
       APP="$dir/app"
@@ -272,7 +313,8 @@ archive)
   # dirs are an argument because an arm's `$XDG_STATE_HOME` is a mktemp path
   # outside its own tree — the recordings live there, not under `<arm-dir>`.
   DEST="$extra"; states=("${@:5}")
-  [ -d "$dir" ] && [ -n "$DEST" ] || { echo "usage: archive <arm-dir> <evidence-dir> [report] [state-dir ...]" >&2; exit 2; }
+  [ -n "$DEST" ] || { echo "usage: archive <arm-dir> <evidence-dir> [report] [state-dir ...]" >&2; exit 2; }
+  require_arm_dir "$dir"
   mkdir -p "$DEST"
   cp -r "$dir/skill" "$DEST/skill" 2>/dev/null || true
   mkdir -p "$DEST/app" && cp -a "$dir/app/." "$DEST/app/" 2>/dev/null || true
