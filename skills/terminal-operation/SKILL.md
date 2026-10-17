@@ -145,12 +145,15 @@ first send, not a relative path.
   on screen — `--quiet-ms` settles through it, and says so (`program_running`). Live
   monitors (top/htop) can be captured mid-repaint — read two frames ~2s apart and answer
   only if they agree, from the per-process rows.
-- **A marker inside your window is not automatically your command's.** If a `--done`
-  timeout says `unattributed-marker`, the tool could not bind that completion to your
-  send: type the line with `--type` rather than sending bare keys, or ask with
-  `--shell-ready`. See `references/channels.md` (Attribution).
+- **A marker inside your window is not automatically your command's.** A `--done` timeout
+  saying `unattributed-marker` means it could not be bound to your send: send the line
+  with `--type` (not bare keys), or ask with `--shell-ready`. Details: `channels.md`.
 - **REPLs**: any colon-opening statement enters the continuation prompt and needs one
   extra empty Enter. Prefer one-liners; anchor on the block's result, not the prompts.
+- **A themed shell may not report its own exit code.** `send` answers `marker`: `shell`
+  (text untouched), `sentinel` (a wrapper owns the prompt, so term-use appended its own
+  completion printf — `sent.text` is what ran) or `skipped` (the suffix would change what
+  runs — no fact for that line, anchor `--until … --since-send`). Details: `channels.md`.
 - **A blank screen is a state**, not an error: `clear`, an exited full-screen program, or a
   quiet daemon. `screenshot` still writes a pane-shaped image and reports `blank: true`.
 - **tmux can exit 0 and still have failed** (a default socket owned by someone else, an
@@ -167,7 +170,7 @@ first send, not a relative path.
 | `shell-not-ready` | something still holds the terminal (a REPL, a TUI) | read the screen, send that program's own quit key, re-probe |
 | `shell-protocol-unavailable` | the fact channel **cannot** answer here (foreground is `ssh`/`mosh`/nested `tmux`, or the hooks were replaced) | change channel: `--until 'regex' --since-send`, or print your own sentinel. Never a quit key on this alone — check `evidence.screen`: an idle prompt means the hooks died, a program asking for input means send it |
 | `unmanaged-pane` | term-use did not start that pane (no recording) — **or** the pane you addressed (`-n NAME:1.0`) is not the one its records describe | `--until`/`--quiet-ms`/`screen`/`send`/`clear` still work at degraded confidence; drop the window/pane suffix, start that pane too, or start your own session if you need fact-level waits |
-| `no-shell-integration` | this shell emits no completion markers | `--cmd bash`/`--cmd zsh` for injected hooks, or wait on program output / `--exit` |
+| `no-shell-integration` | this shell emits no completion markers | `--cmd bash`/`--cmd zsh` for injected hooks; a managed POSIX shell whose stream proves nothing gets a sentinel appended by `send` itself (Traps), so this refusal now means the shell is not one the sentinel can be written for (fish/csh/plain `sh -c`) or the line was `skipped`; otherwise wait on program output / `--exit` |
 | `socket-unreachable` | tmux itself is unreachable — one fault reports one code, from `send`, `wait` and `stop` alike | honour the hint: `--socket NAME`, check `TMUX_TMPDIR`. If `sessions` answers `[]` while a server is alive (`pgrep -aft 'tmux.*NAME'`), the socket file was removed underneath it: `tmux -L NAME kill-server`, then start again |
 | `pane-dead` / `pane-dead-by-signal` | the target died mid-wait | read the signal name from the evidence; respawn if needed |
 | `pillow-missing` / `font-missing` | image channel unavailable | use the text channels (a font ships as a last resort, so this is rare) |

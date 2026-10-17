@@ -37,7 +37,7 @@ PY
 
 # --- human projection: summary lines ---
 $TD trace -n td12 > "$TMP/human.txt" || fail "trace human failed"
-grep -q "i .*type='echo T12'" "$TMP/human.txt" || fail "human trace lacks i summary"
+grep -q "i .*type='echo T12" "$TMP/human.txt" || fail "human trace lacks i summary"
 grep -q "o " "$TMP/human.txt" || fail "human trace lacks o summary"
 grep -q "m wait-met" "$TMP/human.txt" || fail "human trace lacks m summary"
 

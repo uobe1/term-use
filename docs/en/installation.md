@@ -368,7 +368,12 @@ rather than refused for not being a shell we configured. So this error means one
   the fix, not a different shell.
 
 `--cmd zsh` and `--cmd fish` are supported routes to a fact-level wait; only
-`sh`/`dash` have no completion marker to wait for.
+`sh`/`dash` have no completion marker to wait for — and even there `send` appends a
+completion sentinel of its own to the line it submits, so `wait --done` still answers
+at `fact` with the exit code. The send result states which happened
+(`marker: shell | sentinel | skipped`) and a met verdict says in its `note` when the
+marker was synthesized rather than confessed by the shell. Set `TERM_USE_SENTINEL=0`
+to forbid that append: the refusal comes back, honestly.
 
 ### `{"error":{"code":"shell-not-ready",...}}` from `--shell-ready`
 

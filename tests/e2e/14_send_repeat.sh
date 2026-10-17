@@ -52,7 +52,10 @@ python3 -c "
 import json
 first = json.load(open('$TMP/first.json'))
 s = first['sent']
-assert s['text'].endswith('menu_debounce.py') and s['keys'] == ['Enter'], first
+head = s['text'].split('; __tu_ec')[0]
+assert head.endswith('menu_debounce.py') and s['keys'] == ['Enter'], first
+# a lengthened line is only acceptable when the reply says so (see e2e-33)
+assert ('; __tu_ec' not in s['text']) or first.get('marker') == 'sentinel', first
 assert s['calls'] == 2, first
 assert 'repeat' not in first, f'--repeat 1 must not print a constant: {first}'
 rep = json.load(open('$TMP/repeat.json'))

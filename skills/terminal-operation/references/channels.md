@@ -43,6 +43,24 @@ is literally `default` (`-n default:inner:0.0`).
 - `sent` summarizes what went in — `{text, keys, calls}` (`calls` = tmux invocations, so
   text and keys are visibly separate). It is a summary, not the pane's echo: to check
   what the pane *received*, read `out` or the next wait's `evidence.screen`.
+- `marker` (present when this send *submits* a line) says who supplies its completion
+  marker:
+  - `shell` — the pane emits OSC 133 on its own; your text went in exactly as typed.
+  - `sentinel` — it does not (a theme wrapper owns the prompt: blerust, some
+    powerlevel/starship setups), so term-use appended its own
+    `; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007' "$__tu_ec"`. The line on
+    screen is longer than what you wrote, and `sent.text` shows the whole of it — read
+    it back before reasoning about what ran.
+  - `skipped` + `marker_reason` — the suffix would have changed what runs (a background
+    `&`, a dangling pipe or operator, an open `then`/`do`, a heredoc, a trailing comment,
+    an unbalanced quote) or the shell does not speak `$?` (fish, csh). That line has no
+    fact channel: anchor a `--until 'regex' --since-send`, or print a sentinel yourself
+    where the command's own text allows it.
+  A send that does not submit (text, no Enter) reports no `marker` field at all, and so
+  does a bare Enter with nothing pending — there is no line to mark. When Enter arrives
+  as its own send, the pending line is read back from the recording and marked then, so
+  the documented type-then-Enter split still gets a fact. `TERM_USE_SENTINEL=0` turns the
+  append off entirely.
 - Warns `tty-echo-broken` when your text produced no echo bytes (the program mangled the
   tty — run `fix-tty`).
 
@@ -82,6 +100,12 @@ failing and the timeout evidence carries `"degraded": "unattributed-marker"`. Wh
 type the command with `--type` (a typed line carries its own binding) instead of sending
 bare keys, use `--shell-ready` to ask the shell directly, or run the pane on tmux 3.8+,
 where the native channel binds a completion to a *start time* and needs no binding at all.
+
+**When the shell reports nothing at all**, `send` appends a completion sentinel of its own
+(see `## send`) so the exit code still arrives as a `fact` — and the met verdict then says
+in its `note` that the marker was synthesized by term-use, not confessed by the shell. That
+provenance matters: the code is the `$?` of the line's last stage, read immediately, and it
+is not evidence that the target has shell integration.
 
 Verdict shape: `{verdict, confidence, conditions[], evidence{screen,…}, context, via,
 channel, advice?, exit_code?, note?}`. Composite verdicts take the weakest member's

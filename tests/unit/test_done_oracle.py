@@ -45,6 +45,19 @@ def test_done_oracle_degrades_instead_of_refusing():
     assert waiting.choose_done_oracle(plain_sh) == "quiet"
 
 
+def test_a_shell_that_cannot_report_can_still_be_asked():
+    """`sh`/`dash` have no pre-exec hook, so there is nothing to inject — but the
+    `true` probe can carry term-use's own completion sentinel, which is a fact
+    channel. Settling for sampling there was the concession this replaces; a
+    program that IS the pane still outranks it (pane death is the better fact)."""
+    plain_sh = {"shell_integration": False, "cmd": "sh", "last_send_offset": 40}
+    assert waiting.choose_done_oracle(plain_sh) == "quiet", "not told it is trackable"
+    assert waiting.choose_done_oracle(plain_sh, trackable=True) == "probe"
+    prog = {"shell_integration": False, "cmd": "bash deploy.sh"}
+    assert waiting.choose_done_oracle(prog, trackable=True) == "pane-exit"
+    assert waiting.DONE_VIA["probe"] == "shell-ready-probe", "the answer names its oracle"
+
+
 def test_every_oracle_has_a_via_label():
     for oracle in ("osc133", "probe", "pane-exit", "quiet", "quiet-unmanaged"):
         assert oracle in waiting.DONE_VIA, oracle

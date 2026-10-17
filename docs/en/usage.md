@@ -45,9 +45,18 @@ That is the whole loop: **start → send → wait for fact → read the output �
 - `--done` waits for the last thing you sent to finish, choosing the strongest
   oracle the target actually supports and reporting it in `via`: the shell's
   OSC 133 done-marker (fact, with exit code) → the `true` probe when nothing has
-  been sent yet → pane death when the program *is* the pane → quiet sampling
-  (heuristic, and it says so). `advice` names a stronger channel when the target
-  could support one.
+  been sent yet, or when the shell cannot report for itself → pane death when the
+  program *is* the pane → quiet sampling (heuristic, and it says so). `advice`
+  names a stronger channel when the target could support one.
+- A shell that emits **no** markers is not the end of the fact channel. `send`
+  appends a completion sentinel (`; __tu_ec=$?; printf '\033]133;C\a\e]133;D;%s\a'
+  "$__tu_ec"`) to the line it submits, so the code arrives as bytes term-use wrote —
+  the send result says `marker: sentinel`, the met verdict says the same in its
+  `note`, and the line on screen is visibly longer than what you typed. Lines the
+  suffix could change in meaning (a background `&`, a dangling pipe, an open
+  `then`/`do`, a heredoc, a comment, an unbalanced quote) and shells that do not
+  speak `$?` (fish, csh) are left alone: `marker: skipped` with the reason, and no
+  fact is claimed. `TERM_USE_SENTINEL=0` refuses the append even when it would help.
 - The done-marker oracle has two servers. term-use scans its own recording
   (`via: osc133`); on **tmux 3.8+** the CLI asks tmux first, and when that is
   what answered you get `via: tmux-command-status` plus a `channel` key naming

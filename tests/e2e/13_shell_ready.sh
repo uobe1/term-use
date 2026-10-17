@@ -58,16 +58,24 @@ $TD send -n "$NAME" --key C-d >/dev/null || fail "send C-d failed"
 $TD wait -n "$NAME" --shell-ready --timeout 10 >/dev/null \
   || fail "shell-ready after quitting the REPL should meet"
 
-# --- non-bash session: structured no-shell-integration, no probe sent ---
+# --- a shell with no integration of its own: the probe carries its own marker ---
 $TD start -n td13sh --cmd sh --socket "$SOCK" >/dev/null || fail "sh start failed"
-if $TD wait -n td13sh --shell-ready --timeout 5 >/dev/null 2>"$TMP/noint.json"; then
-  fail "shell-ready without shell integration must fail"
+$TD wait -n td13sh --shell-ready --timeout 10 >/dev/null \
+  || fail "plain sh should answer --shell-ready once the probe brings a sentinel"
+
+# ... and with the sentinel switched off, the honest refusal must come back: an
+# unavailable channel is a fact about the pane, not something to fail silently.
+$TD start -n td13sh2 --cmd sh --socket "$SOCK" >/dev/null || fail "sh2 start failed"
+if TERM_USE_SENTINEL=0 $TD wait -n td13sh2 --shell-ready --timeout 5 \
+     >/dev/null 2>"$TMP/noint.json"; then
+  fail "shell-ready without any possible marker must fail"
 fi
 python3 -c "
 import json,sys
 e=json.load(open('$TMP/noint.json'))['error']
 assert e['code']=='no-shell-integration', e
 " || fail "expected no-shell-integration"
+$TD stop -n td13sh2 >/dev/null 2>&1 || true
 
 # --- regression: on a ready shell, --until mismatch + --shell-ready must
 #     report plain timeout (shell-not-ready would push agents to send a

@@ -24,6 +24,12 @@ def session_dir(session: str) -> Path:
     return state_root() / session
 
 
+# Key names that submit a line. Three readers need the same list (what is pending,
+# what was asked to run, whether this send may carry a marker), and a fourth added
+# here is cheaper than a fourth spelling of the same rule.
+SUBMIT_KEYS = ("enter", "c-m", "c-j", "m-enter")
+
+
 def read_state(session: str) -> dict:
     p = session_dir(session) / "state.json"
     if not p.exists():
@@ -225,7 +231,7 @@ def pending_input(session: str, since_offset: int) -> str | None:
             if "text" in ev:
                 typed += ev["text"]
             elif "key" in ev:
-                if str(ev["key"]).lower() in ("enter", "c-m", "c-j", "m-enter"):
+                if str(ev["key"]).lower() in SUBMIT_KEYS:
                     typed = ""  # the line was submitted: nothing pending
     return typed or None
 
@@ -243,10 +249,36 @@ def last_sent_text(session: str, since_offset: int) -> str | None:
             continue
         text = "".join(ev["text"] for ev in data
                        if isinstance(ev, dict) and "text" in ev)
-        if any(isinstance(ev, dict) and str(ev.get("key", "")).lower()
-               in ("enter", "c-m", "c-j", "m-enter") for ev in data):
+        if any(isinstance(ev, dict)
+               and str(ev.get("key", "")).lower() in SUBMIT_KEYS for ev in data):
             last = text or None
     return last
+
+
+def shell_markers_proven(session: str) -> bool:
+    """Does this pane's shell run its own prompt cycle, without our help?
+
+    term-use's completion sentinel writes a `C`+`D` pair, so a `D` somewhere in the
+    stream proves a command finished — not that the *shell* will keep reporting
+    them. A prompt marker (`A`/`B`, produced by PS1/PROMPT_COMMAND machinery, which
+    is exactly what a wrapper like blerust takes over) together with a `D` is that
+    proof, and it is what decides whether `send` has to append a sentinel at all.
+    """
+    path = session_dir(session) / "raw.log"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    with path.open("rb") as fh:
+        fh.seek(max(0, size - 65536))
+        chunk = fh.read()
+
+    def seen(*letters: str) -> bool:
+        return any(f"{esc}]{code};{letter}".encode() in chunk
+                   for esc in ("\\u001b", "\x1b") for code in ("133", "633")
+                   for letter in letters)
+
+    return seen("A", "B") and seen("D")
 
 
 class V2Writer:

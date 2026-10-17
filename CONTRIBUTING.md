@@ -101,6 +101,17 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   first, because `running` flips 1→0 with the *old* start time when a busy shell
   finishes. Position alone is not ownership — a met `fact` for the command before
   yours is the worst thing this tool can do.
+- **A synthesized fact must name its author.** When the pane's shell emits no OSC 133 at
+  all — an rc file that hands bash to a prompt wrapper (blerust and friends) clears
+  `PS1`/`PROMPT_COMMAND` and reads lines itself, so no injection can survive it — `send`
+  appends `; __tu_ec=$?; printf '\e]133;C\a\e]133;D;%s\a' "$__tu_ec"` to the line it
+  *submits*, and the code reaches the recording as bytes term-use wrote. Three rules keep
+  that honest rather than clever: only a submitting send gets one (a half-typed line is
+  never lengthened), a line whose meaning the suffix could change is refused with a reason
+  (`marker: skipped` — background `&`, dangling pipe, open `then`/`do`, heredoc, comment,
+  unbalanced quote, or a shell that does not speak `$?`), and the verdict says in its
+  `note` that the marker was synthesized and covers the line's last stage only. The reply
+  always carries `marker: shell|sentinel|skipped`, so nothing has to guess from the pane.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility
