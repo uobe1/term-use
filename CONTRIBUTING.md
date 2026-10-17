@@ -88,6 +88,13 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   Timeouts return an evidence snapshot and never kill the target.
 - **Atomic state**: `state.json` is always written via tmp + rename;
   `last_send_offset` is a byte offset into `raw.log`, never a timestamp.
+- **A completion is authorized, not merely positioned**: `send` reads its offset from
+  the recording's current size while the recorder lags the pane, so the *previous*
+  command's `C` and `D` can both land after it. `CmdDone` accepts a `D` only when the
+  `C` that opened it is also inside the send's window, and tmux 3.8's native answer is
+  rejected while `pane_command_start_time <= baseline` even if `end_time` moved. Position
+  alone is not ownership — a met `fact` for the command before yours is the worst thing
+  this tool can do.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility

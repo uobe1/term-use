@@ -220,6 +220,13 @@ class CmdDone(Condition):
         if code is None:
             return None                     # no marker has ever reached tmux
         base = state.get("native_baseline") or {}
+        start, base_start = m.get("pane_command_start_time"), base.get("start_time")
+        if base_start is not None and start is not None and start <= base_start:
+            # tmux is still reporting the command that was running when we
+            # stamped: it started no later than that one, so it cannot be ours.
+            # Same class as the byte channel's lag race, and the byte scan below
+            # is the precise answer when this one cannot give it.
+            return None
         if (m.get("pane_command_end_time") or 0) > (base.get("end_time") or 0):
             return code
         if base.get("status") is None or self._saw_running or code != base.get("status"):
@@ -242,20 +249,38 @@ class CmdDone(Condition):
             return True
         offset = state.get("last_send_offset", 0)
         sc = osc133.OSC133Scanner()
-        last_done = None    # (code, byte_pos) — a D preceded by a C
+        last_done = None    # (code, byte_pos, c_pos) — a D preceded by a C
         last_abort = None   # byte_pos of a stray D with no C
+        c_pos = None        # byte position of the C that opened the current run
         for _ts, code, data, pos in records.events_since(self.session, 0):
             if code != "o" or not isinstance(data, str):
                 continue
             for ev in sc.feed(data):
-                if ev["kind"] == "done":
-                    last_done = (ev.get("code"), pos)
-                elif ev["kind"] == "aborted":
+                kind = ev["kind"]
+                if kind == "preexec":
+                    c_pos = pos
+                elif kind in ("prompt", "cmdline"):
+                    c_pos = None        # mirrors the scanner's own reset
+                elif kind == "done":
+                    last_done = (ev.get("code"), pos, c_pos)
+                elif kind == "aborted":
                     last_abort = pos
+                    c_pos = None
         # A done is never masked by a later stray marker: shells emit more than
         # one D per prompt (an integration hook plus the user's own), and the
         # trailing one carries no command.
-        if last_done is None or last_done[1] < offset:
+        #
+        # The C must sit in this send's window too. `send` takes its offset from
+        # the recording's size, and the recorder lags the pane: send while the
+        # previous command is still running (or while the box is loaded) and its
+        # C *and* D both land after that offset, so a position test on the D
+        # alone answers for the wrong command — measured on a loaded machine,
+        # where `--done` reported a met `fact` two seconds into a 12-second
+        # sleep. Requiring the authorizing C to arrive after the offset excludes
+        # markers opened before this send and keeps every legitimate case: a
+        # command always starts after the bytes that asked for it.
+        if last_done is None or last_done[1] < offset or last_done[2] is None \
+                or last_done[2] < offset:
             return False
         code_ = last_done[0]
         del last_abort  # informative only; completion is already proven

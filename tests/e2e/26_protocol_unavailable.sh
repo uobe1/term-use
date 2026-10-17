@@ -59,6 +59,9 @@ if command -v ssh >/dev/null; then
         fc=$($TD screen -n td26s --meta | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pane_current_command") or "")')
         [ "$fc" = "ssh" ] && break
         sleep 0.4
+        # Say what we actually saw: "ssh died" and "ssh never came up" need
+        # different fixes, and a silent 6-second stall looks like either.
+        [ "$fc" = "bash" ] && echo "note: pane is back at bash (ssh exited?)" >&2
       done
     fi
     [ "$fc" = "ssh" ] || fail "could not keep ssh in the foreground (saw: $fc)"

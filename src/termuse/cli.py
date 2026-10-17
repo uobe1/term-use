@@ -251,6 +251,7 @@ def stamp_native_baseline(target, state: dict) -> None:
     state["native_baseline"] = {
         "status": m.get("pane_command_status"),
         "end_time": m.get("pane_command_end_time"),
+        "start_time": m.get("pane_command_start_time"),
         "running": m.get("pane_command_running")}
 
 

@@ -20,7 +20,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "db.sqlite")
 ROWS = ("alpha", "beta", "gamma")
-RUN_SECONDS = 6.0
+RUN_SECONDS = float(os.environ.get("SYNC_RUN_SECONDS") or 6.0)
+# The e2e that demonstrates "the anchor is true while the sync is not" needs a
+# window longer than the test's own CLI calls cost on a loaded box; the A/B arms
+# run the default.
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 

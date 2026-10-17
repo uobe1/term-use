@@ -15,6 +15,10 @@ TMP="$(mktemp -d)"
 export XDG_STATE_HOME="$TMP/state"
 mkdir -p "$TMP/tmux" "$TMP/app"
 export TMUX_TMPDIR="$TMP/tmux"
+# The trap's window has to outlast the test's own CLI calls: each invocation costs
+# ~1-3s of process startup on this box, and six seconds of sync is not six seconds
+# of wall clock when the suite is loaded.
+export SYNC_RUN_SECONDS=25
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
 trap cleanup EXIT
