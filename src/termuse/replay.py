@@ -103,26 +103,24 @@ def _segments(session: str, offset: int | None, elapsed: float | None):
     A resize reflows what is already on the screen, so replaying it out of
     order would paint a different frame than the one that was recorded.
     """
-    items: list[tuple] = []
+    segs: list[tuple[str, tuple | None]] = []
+    buf, geom = "", None
     for ts, code, data, pos in records.events_since(session, 0):
         if elapsed is not None and ts > elapsed:
             break
-        if offset is not None and pos < offset:
-            continue
-        if code == "o" and isinstance(data, str):
-            items.append(("o", data))
-        elif code == "r" and isinstance(data, dict):
-            items.append(("r", data.get("cols"), data.get("rows")))
-    segs: list[tuple[str, tuple | None]] = []
-    buf, geom = "", None
-    for it in items:
-        if it[0] == "o":
-            buf += it[1]
-        else:
+        if code == "r" and isinstance(data, dict):
             if buf:
                 segs.append((buf, geom))
                 buf = ""
-            geom = (it[1], it[2])
+            # Geometry is cumulative state, not scoped output: a resize that
+            # happened before `--at last-send` still decides the width of the
+            # frame that starts there, so it is read regardless of the offset.
+            geom = (data.get("cols"), data.get("rows"))
+            continue
+        if code == "o" and isinstance(data, str):
+            if offset is not None and pos < offset:
+                continue
+            buf += data
     if buf:
         segs.append((buf, geom))
     return segs
