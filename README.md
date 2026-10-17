@@ -9,7 +9,6 @@ interface, and every answer arrives with evidence attached.
 ![version](https://img.shields.io/badge/version-2.0.0a5-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
 ![requires](https://img.shields.io/badge/external%20dep-tmux%203.2a%2b-1BB91F)
-![stars](https://img.shields.io/github/stars/uobe1/term-use?style=social)
 ![issues](https://img.shields.io/github/issues/uobe1/term-use)
 ![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 

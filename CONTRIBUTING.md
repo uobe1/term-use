@@ -1,7 +1,7 @@
 # Contributing to term-use
 
-Thanks for your interest in contributing! Bug reports, documentation and code are all
-welcome. The workflow is **issues + pull requests**: direct pushes to `main` are
+Bug reports, documentation and code are all welcome. The workflow is
+**issues + pull requests**: direct pushes to `main` are
 blocked by a branch ruleset, so all changes — including small ones — arrive through PRs.
 
 ## Reporting bugs

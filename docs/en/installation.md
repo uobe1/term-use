@@ -141,33 +141,34 @@ If `term-use --help` is not found after a uv install, uv's tool bin
 
 ### Step 2 — install the skill
 
-The skill is the `skills/terminal-operation/` directory in this repo.
-Copy or symlink it into your agent's skills directory so the agent can find it.
+The skill is the `skills/terminal-operation/` directory in this repo — a core
+`SKILL.md` plus the `references/` it points at. Install the whole directory, not
+just the core.
+
+Use `~/.agents/skills/`: a shared location that most agents read, so one install
+serves all of them. For a single project instead, use its `./.agents/skills/`.
+
+```bash
+SKILLS_DIR="$HOME/.agents/skills"; mkdir -p "$SKILLS_DIR"
+ln -s "$PWD/skills/terminal-operation" "$SKILLS_DIR/terminal-operation"
+```
+
+A symlink stays current with `git pull`; to pin a version, copy instead:
+
+```bash
+cp -r "$PWD/skills/terminal-operation" "$SKILLS_DIR/terminal-operation"
+```
+
+If your agent reads only its own directory, it is the same command with a
+different path:
 
 | Agent | Skills directory |
 |---|---|
-| CodeBuddy | `~/.codebuddy/skills/` |
 | Claude Code | `~/.claude/skills/` |
 | Codex | `~/.codex/skills/` |
 | Cursor | `~/.cursor/skills/` |
 | Gemini CLI | `~/.gemini/skills/` |
 | OpenCode | `~/.config/opencode/skills/` |
-
-From the repo root, symlink (recommended — stays current with `git pull`):
-
-```bash
-ln -s "$PWD/skills/terminal-operation" \
-      ~/.codebuddy/skills/terminal-operation
-```
-
-…or copy:
-
-```bash
-cp -r "$PWD/skills/terminal-operation" \
-      ~/.codebuddy/skills/terminal-operation
-```
-
-(Replace `~/.codebuddy/skills` with your agent's directory from the table above.)
 
 Restart the agent (or start a fresh session) so it picks up the new skill. It then
 triggers automatically by description — no further setup.
@@ -178,7 +179,7 @@ triggers automatically by description — no further setup.
 term-use sessions
 # → [] — or a JSON array of existing tmux sessions; both are success
 
-ls ~/.codebuddy/skills/terminal-operation/SKILL.md   # skill present
+ls "$SKILLS_DIR/terminal-operation/SKILL.md"   # skill present
 ```
 
 A real end-to-end check that the CLI *and* the method work:
@@ -242,7 +243,7 @@ python3 -m pip uninstall term-use
 Remove the skill from your agent's skills directory:
 
 ```bash
-rm -rf ~/.codebuddy/skills/terminal-operation
+rm -rf "$SKILLS_DIR/terminal-operation"
 ```
 
 Recordings under `$XDG_STATE_HOME/term-use/` are plain files; delete the
@@ -286,8 +287,9 @@ between `start` and the later command — keep it stable.
 
 The skill symlink/copy may be in the wrong directory, or the agent session started
 before the skill was added. Confirm
-`~/.codebuddy/skills/terminal-operation/SKILL.md` exists (adjust the
-path for your agent), then restart the agent or open a fresh session.
+`$SKILLS_DIR/terminal-operation/SKILL.md` exists (Step 2 sets that path; use your
+agent's own skills directory if it does not read `~/.agents/skills`), then restart
+the agent or open a fresh session.
 
 ### Sessions "disappear" between commands
 

@@ -169,10 +169,3 @@ Do not read these up front — each is for a moment you will recognize:
 - Never claim a run happened without evidence: the `out`/`trace` text, and for layout claims
   the `screenshot` path.
 - Timeouts are data: report the `error` JSON, do not paper over it.
-
-## Tester protocol
-
-If you were handed this skill as a blind tester you have the right to complain: end your
-output with `FEEDBACK: <what confused you, what was missing, what you had to guess>`, and
-report `STATS calls=… blind_sleeps=… commands=…` plus a `CONFUSION` line when the harness
-asks for one.
