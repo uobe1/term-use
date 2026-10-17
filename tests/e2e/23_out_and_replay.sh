@@ -62,7 +62,7 @@ cat > "$TMP/timeline.sh" <<'SH'
 printf 'FRAME_EARLY_ONLY\n'
 sleep 2
 printf 'FRAME_LATE_ADDED\n'
-sleep 30
+sleep 300
 SH
 chmod +x "$TMP/timeline.sh"
 $TD start -n td23t --cmd "bash $TMP/timeline.sh" --socket "$SOCK" \
@@ -107,8 +107,26 @@ grep -q 'FRAME_EARLY_ONLY' "$TMP/late.txt" || fail "late replay must still show 
 
 # --- the strongest claim the engine makes: replaying everything reproduces
 #     the live screen, because tmux itself is the emulator doing the replay ---
-$TD screen -n td23t >"$TMP/live.txt"
+# Order matters, and so does the precondition. Reading the live screen *before*
+# the rebuild spends seconds of replay while the program carries on painting —
+# and if the program has exited, tmux writes an exit notice *over* the screen,
+# which is what made this compare 2 replayed lines against 1 live line. So: the
+# claim only holds for a live program, check that, rebuild, then read until two
+# reads agree.
 $TD replay -n td23t --at 999 >"$TMP/full.txt"
+$TD screen -n td23t --meta | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+assert m.get("pane_dead") is not True, f"the program exited; the exit notice owns the screen: {m}"
+' || fail "replay-vs-live needs a live pane (see above)"
+: >"$TMP/prev.txt"
+for _ in 1 2 3 4 5 6 7 8; do
+  $TD screen -n td23t >"$TMP/live.txt"
+  if [ -s "$TMP/live.txt" ] && cmp -s "$TMP/live.txt" "$TMP/prev.txt"; then break; fi
+  cp "$TMP/live.txt" "$TMP/prev.txt"
+  sleep 0.4
+done
+[ -s "$TMP/live.txt" ] || fail "the live pane never painted anything to compare against"
 python3 - "$TMP/live.txt" "$TMP/full.txt" <<'PY' || fail "full replay must rebuild the live screen exactly"
 import sys
 def norm(p):

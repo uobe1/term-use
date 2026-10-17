@@ -37,9 +37,12 @@ back, and markers forwarded from the far side of ssh.
   mark. Only `evidence.screen` separates them: an idle prompt on screen means the hooks
   died (change channel), a program asking for something means send that input. Never send a
   quit key on the strength of the flag alone.
-- Nothing an agent can do turns the group on below 3.8. If the keys are absent, stop looking
-  for them and use the version-independent pair: `screen --meta`'s
-  `pane_current_command` + `last_output_age_s`.
+- Nothing an agent can do turns the group on below 3.8. If the keys are absent, do not
+  go looking for a liveness signal on the screen either: `pane_current_command` is a
+  weak hint (measured on 3.7c: it reported `bash` 1.2 seconds into a `sleep 5`), and
+  `last_output_age_s` only measures silence. The version-independent fact is term-use's
+  own marker stream — `C` with no `D` since your send — which the tool reports as
+  `program_running` on a quiet settle and `in_flight` on a `--done` timeout.
 
 ## tmux behavior the tool relies on, by version
 

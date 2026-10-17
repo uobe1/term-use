@@ -46,6 +46,12 @@ $TD out   -n demo --socket "$SOCK"          # what it printed, inside a byte bud
 with no server yet answers `[]` (with a note), not an error. Stop what you start: `stop`
 (killing the last session takes the tmux server, and any nested sessions, with it).
 
+Two facts that save a call each: **a met `wait` verdict already carries the screen** in
+`evidence.screen` (re-reading after a met wait is usually redundant), and **`trace`'s
+header prints `started=`** — the recording's wall-clock origin — so `run` wrote that file
+versus `check` did is answerable by comparing an mtime to `started + elapsed`, without
+opening `raw.log` yourself.
+
 ### When the target is a plain CLI, not a TUI
 
 - `--done` is the right wait even for a 50ms command; `--exit` is wrong (the pane is the
@@ -57,8 +63,17 @@ with no server yet answers `[]` (with a note), not an error. Stop what you start
   a check opens it. Assert what only the program could have written (rows, a version
   pragma, a byte count), never a path. Reading program-written state is legitimate
   evidence; the red line is editing it.
-- `--quiet-ms` proves the *display* stopped changing, not that the program finished; while
-  a program holds the pane its verdict carries `program_running: true` and a `note`.
+- **A success string is not an oracle either.** A preflight (`check`, `--dry-run`, a status
+  verb) that prints the line a real run prints makes the screen worthless as completion
+  evidence — and `--until 'SYNC: COMPLETE' --since-send` can still be satisfied by it if
+  the string is emitted after your send. Settle it by reproduction in a scratch copy: run
+  the preflight there, then the real thing, and see which one creates the artifact. Two
+  calls, and it ends the argument.
+- `--quiet-ms` proves the *display* stopped changing, not that the program finished; while a
+  command is in flight its verdict carries `program_running: true` and a `note`. When
+  `--done` itself times out, read `evidence.in_flight`: true means it started and has not
+  finished, so the next move is a longer `--timeout` or the input it is waiting for — never
+  a looser `--until`.
 
 ## Choosing a channel
 
@@ -67,8 +82,8 @@ with no server yet answers `[]` (with a note), not an error. Stop what you start
 | Did my command finish? what code? | `wait --done [--expect-code C]` |
 | What did it print? | `out` (since your last send; `--all` for the session) |
 | Which row is highlighted / what color / is X on screen / where do I click? | `screen --grep --attr reverse` / `--find TEXT` (1-based, click-ready) / `--element-at X Y` |
-| Is anything on screen at all, or did my input never land? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s`, `pane_current_command` |
-| Is a program running right now? | `screen --meta` → `pane_current_command` + `last_output_age_s` (every tmux version) |
+| Is anything on screen at all, or did my input never land? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` |
+| Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`), a met `--quiet-ms` says it (`program_running`); `pane_current_command` is only a hint — measured on 3.7c it reported `bash` 1.2s into a `sleep 5` |
 | How is this frame laid out? | `screenshot` — once |
 | Something else must hold too | add it to the same `wait` (AND; weakest confidence wins) |
 

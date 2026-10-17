@@ -611,13 +611,20 @@ class QuietCondition(Condition):
         return False
 
     def _program_busy(self, meta: dict | None) -> bool:
+        """Is a command in flight? True on fact evidence only, in this order.
+
+        tmux 3.8 says `running`, otherwise the absence of `D` after a `C` in our
+        own stream says it. `pane_current_command` is deliberately NOT consulted:
+        measured on 3.7c it fell back to `bash` 1.2s into a `sleep 5`, so as a
+        liveness signal it is a lie at exactly the timescale a settle happens on.
+        """
         nat = native_state(meta)
         if nat and nat["running"]:
             return True
-        fg = str((meta or {}).get("pane_current_command") or "")
-        if not fg:
-            return False
-        return fg not in ("", _managed_shell(self.state))
+        if self.state is not None:
+            return in_flight(self.session,
+                             int(self.state.get("last_send_offset", 0) or 0))
+        return False
 
     def to_json(self, met: bool) -> dict:
         out = {**super().to_json(met), "ms": self.ms}
@@ -809,6 +816,38 @@ def timeout_evidence(ctx, condition: Condition) -> dict:
     return {"screen": screen, "cursor": cursor, "raw_tail": raw_tail,
             **({"native": nat} if nat else {}),
             "conditions": [condition.to_json(False)]}
+
+
+def in_flight(session: str, since_offset: int) -> bool:
+    """A command started after that offset and has not reported completion.
+
+    `C` with no following `D` in term-use's own recording — so it works on every
+    tmux version, unlike `pane_command_running`. This is the reading that was
+    missing from the tester's three-way ambiguity and from both a6 arms' timeouts:
+    *this is a command still running*, not a dead channel and not a program
+    sitting on the shell, and it must not come with a "loosen your --until" hint.
+    """
+    try:
+        text = records.stream_since(session, since_offset)
+    except (TDError, OSError):
+        return False
+    start = max(text.rfind(f"\x1b]{code};C") for code in ("133", "633"))
+    if start < 0:
+        return False
+    tail = text[start:]
+    return not any(f"\x1b]{code};{kind}" in tail
+                   for code in ("133", "633") for kind in ("D", "E"))
+
+
+def timeout_hint_for(cond: "Condition", busy: bool = False) -> str:
+    if busy:
+        return ("a command reported its start (OSC 133 C) and has not reported a "
+                "completion since, so this snapshot is mid-flight — the wait did "
+                "not fail, the program is not finished. Raise --timeout and keep "
+                "waiting, or read evidence.screen: if the program is asking for "
+                "input, send that input. Do not loosen --until on a running "
+                "command, and do not send a quit key without looking.")
+    return timeout_hint(cond)
 
 
 def timeout_hint(condition: Condition) -> str:

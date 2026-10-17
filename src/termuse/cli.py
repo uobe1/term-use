@@ -452,15 +452,17 @@ def require_shell_integration(target: tmuxio.Target, state: dict | None,
     return state
 
 
-def _with_context(ctx, cond) -> dict:
+def _with_context(ctx, cond, **extra) -> dict:
     """Timeout evidence plus its price tag.
 
     The numbers ride inside the JSON rather than as a stderr warning: on the
     failure path stderr must stay single-line JSON, which is what every
-    consumer of `{"error":…}` parses.
+    consumer of `{"error":…}` parses. `extra` carries the diagnosis facts
+    (today `in_flight`), because an agent decides with them, not with the hint.
     """
     ev = waiting.timeout_evidence(ctx, cond)
     ev["context"] = tdbudget.text_context(ev.get("screen") or "")
+    ev.update({k: v for k, v in extra.items() if v})
     return ev
 
 
@@ -637,9 +639,10 @@ def cmd_wait(args) -> int:
                 # write a report about a program that is still running.
                 verdict["note"] = (
                     "the pane stopped *repainting*, which is not the same as "
-                    "finishing: a program still holds the foreground "
-                    "(screen --meta's pane_current_command says which). For "
-                    "\"did it finish\", use wait --done")
+                    "finishing: a command reported its start and has not reported "
+                    "a completion, so it is still running. For the completion "
+                    "question use wait --done (or --exit when the program is the "
+                    "pane)")
             if any(getattr(c, "silent_unproven", False) for c in conditions):
                 verdict["note"] = (verdict.get("note", "") +
                                    " Nothing has been written since your send, "
@@ -693,10 +696,13 @@ def cmd_wait(args) -> int:
                            "re-probe; if the shell was still starting, retry "
                            "with a longer --timeout",
                       evidence=_with_context(ctx, cond))
+    busy = (managed and (args.done or args.cmd_done)
+            and waiting.in_flight(target.session,
+                                  (state or {}).get("last_send_offset", 0)))
     raise TDError("timeout",
                   f"conditions not met within {args.timeout}s",
-                  hint=waiting.timeout_hint(cond),
-                  evidence=_with_context(ctx, cond))
+                  hint=waiting.timeout_hint_for(cond, busy),
+                  evidence=_with_context(ctx, cond, in_flight=busy))
 
 
 def cmd_resize(args) -> int:
@@ -979,8 +985,19 @@ def cmd_trace(args) -> int:
                 print(json.dumps(ev, ensure_ascii=False))
                 continue
             if isinstance(ev, dict):  # v2 header
+                # `started=` carries the recording's own epoch so every
+                # `[elapsed]` below can be turned into wall-clock without
+                # reading raw.log by hand. Both arms of the a6 A/B needed this:
+                # attributing "which invocation wrote this file" is otherwise
+                # guesswork against an mtime. One line, paid once.
+                start = ev.get("timestamp")
+                if start:
+                    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(start))
+                    extra = f" started={stamp} ({start!r})"
+                else:
+                    extra = ""
                 print(f"# v{ev.get('version')} {ev.get('width')}x{ev.get('height')}"
-                      f" cmd={ev.get('cmd')!r}")
+                      f" cmd={ev.get('cmd')!r}{extra}")
                 continue
             ts, code, data = ev
             if code == "o":

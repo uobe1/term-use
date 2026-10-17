@@ -60,6 +60,33 @@ assert v["confidence"] == "fact" and v["exit_code"] == 0, v
 assert "note" not in v, f"--done has nothing to caveat: {v}"
 ' || fail "--done must still prove completion after the silent stretch"
 
+# --- 1b. a timeout on a command that is still running must say so -----------
+# The a6 arms both hit this: `--done` timing out mid-run produced a hint
+# pointing at a looser --until, which is the wrong advice for a program that is
+# simply still working. C-without-D in our own recording is the fact.
+$TD send -n td30 --socket "$SOCK" --type "python3 -c 'import time; time.sleep(9)'" \
+  --key Enter >/dev/null || fail "send failed"
+sleep 1.5
+if $TD wait -n td30 --socket "$SOCK" --done --timeout 2 >/dev/null 2>&1; then
+  fail "--done must not meet while the sleep runs"
+fi
+$TD wait -n td30 --socket "$SOCK" --done --timeout 2 2>"$TMP/mid.json" || true
+python3 -c "
+import json
+e = json.load(open('$TMP/mid.json'))['error']
+assert e['code'] == 'timeout', e['code']
+assert e['evidence'].get('in_flight') is True, \
+    'the evidence must state that a command is mid-flight: ' + json.dumps(e)[:200]
+h = e['hint'] or ''
+assert 'mid-flight' in h and 'loosen' in h, f'the hint must retract the --until advice: {h}'
+" || fail "in-flight timeout (see above)"
+$TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 25 >/dev/null \
+  || fail "the long sleep never completed"
+
+# --- 1c. trace says when the session started, so elapsed maps to wall clock -
+$TD trace -n td30 --socket "$SOCK" 2>/dev/null | head -1 | grep -q 'started=' \
+  || fail "trace's header must carry the recording's start time (both a6 arms parsed raw.log by hand to attribute a file write)"
+
 # --- 2. a colored traceback is not a redrawn program -----------------------
 $TD send -n td30 --socket "$SOCK" --type "python3 -c 'raise ValueError(1)'" \
   --key Enter >/dev/null

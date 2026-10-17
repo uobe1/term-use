@@ -48,15 +48,23 @@ if command -v ssh >/dev/null; then
   # 192.0.2.1 is RFC 5737 documentation space: unroutable by definition, so ssh
   # blocks in "connecting" and stays the pane's foreground program — the shape
   # of a live remote session, without needing a remote host.
-  $TD send -n td26s --type "ssh -o BatchMode=yes -o ConnectTimeout=30 -p 65500 192.0.2.1" \
-    --key Enter >/dev/null || fail "send ssh failed"
-  # wait until the pane's foreground really is ssh (observed, not assumed)
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  SSHCMD="ssh -o BatchMode=yes -o ConnectTimeout=60 -p 65500 192.0.2.1"
+  need_ssh() {   # the precondition of every case below, re-checked not assumed:
+    # ssh can give up early on some networks, and a case that runs after a burned
+    # 6s timeout is 6s closer to that than the case before it.
     fc=$($TD screen -n td26s --meta | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pane_current_command") or "")')
-    [ "$fc" = "ssh" ] && break
-    sleep 0.4
-  done
-  [ "$fc" = "ssh" ] || fail "could not get ssh into the foreground (saw: $fc)"
+    if [ "$fc" != "ssh" ]; then
+      $TD send -n td26s --type "$SSHCMD" --key Enter >/dev/null || fail "send ssh failed"
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        fc=$($TD screen -n td26s --meta | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pane_current_command") or "")')
+        [ "$fc" = "ssh" ] && break
+        sleep 0.4
+      done
+    fi
+    [ "$fc" = "ssh" ] || fail "could not keep ssh in the foreground (saw: $fc)"
+  }
+  $TD send -n td26s --type "$SSHCMD" --key Enter >/dev/null || fail "send ssh failed"
+  need_ssh
 
   if $TD wait -n td26s --cmd-done --timeout 6 >/dev/null 2>"$TMP/a.json"; then
     fail "--cmd-done must not claim success while the local shell is blocked in ssh"
@@ -70,6 +78,7 @@ assert '--until' in (e['hint'] or ''), f'point at a usable channel: {e}'
 " || fail "ssh shape (see above)"
   no_quit_key_hint "$TMP/a.json"
 
+  need_ssh                      # the case above burned 6s of it
   if $TD wait -n td26s --shell-ready --timeout 6 >/dev/null 2>"$TMP/b.json"; then
     fail "--shell-ready must not pretend under ssh"
   fi
@@ -81,6 +90,7 @@ assert e['code'] == 'shell-protocol-unavailable', e
   no_quit_key_hint "$TMP/b.json"
 
   # --done must not burn its whole timeout on a dead channel
+  need_ssh                      # and the case above burned another 6s
   start=$(date +%s)
   $TD wait -n td26s --done --timeout 8 >/dev/null 2>"$TMP/c.json" || true
   took=$(( $(date +%s) - start ))
