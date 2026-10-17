@@ -56,7 +56,8 @@ assert v.get("exit_code") == 0, v
 assert v.get("via") in ("osc133", "tmux-command-status"), v
 note = v.get("note") or ""
 assert "sentinel" in note, f"the verdict must say the marker was synthesized: {note}"
-assert "printf" not in note, f"the note must name the caller's stage, not our suffix: {note}"
+assert "__tu_ec" not in note, \
+    f"the note must name the caller's stage, not our own suffix: {note}"
 st = json.load(open(__import__("sys").argv[2]))
 assert st.get("marker_source") == "sentinel", st
 assert st.get("shell_integration") is True, st  # the stream proved it, not the launch guess

@@ -316,6 +316,11 @@ class CmdDone(Condition):
         2. `send` measured that the recording was quiet — the fallback for a
            keys-only send, which has nothing to echo. It is a heuristic, not a
            proof: a pane whose recorder is paused looks identical to an idle one.
+           It is refused outright once this send is the kind we narrate
+           (`marker_source: "sentinel"`), because then the missing echo is
+           usually the same lag still in flight — measured on the device, where
+           the frozen recorder made the file look quiet and the *previous*
+           line's sentinel answered for a `sleep 12` that had not started.
 
         Neither holds means the window contains markers belonging to an unknown
         command. Then a `fact` would be a guess about someone else's exit code,
@@ -327,7 +332,8 @@ class CmdDone(Condition):
             pos = echo_barrier(self.session, offset, typed)
             if pos is not None:
                 return pos
-        if state.get("last_send_settled"):
+        if (state.get("last_send_settled")
+                and state.get("marker_source") != "sentinel"):
             return offset
         return None
 

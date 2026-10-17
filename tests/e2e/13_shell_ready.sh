@@ -28,8 +28,12 @@ fi
 python3 -c "
 import json,sys
 e=json.load(open('$TMP/bare.json'))['error']
-assert e['code']=='timeout', e
-" || fail "bare --cmd-done should fail with timeout"
+# The contract is 'no completion is claimed', not one particular code: a session
+# whose rc file ate the prompt machinery refuses with shell-protocol-unavailable
+# (nothing will ever arrive), an integrated one times out (bash's first D has no
+# preceding C). Either is honest; meeting would not be.
+assert e['code'] in ('timeout', 'shell-protocol-unavailable'), e
+" || fail "bare --cmd-done must refuse, not claim a fact"
 
 # --- shell-ready right after start: probe answered (fact) ---
 $TD wait -n "$NAME" --shell-ready --timeout 10 | python3 -c '

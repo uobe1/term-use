@@ -48,7 +48,7 @@ class Ctx:
         return ""
 
 
-def build(name, events, pre=0, settled=None, baseline="absent"):
+def build(name, events, pre=0, settled=None, baseline="absent", marker=None):
     """Write a recording + state.json the way `send` leaves them.
 
     `events` is a list of ("o", text) pane-output payloads or ("i", injection)
@@ -74,6 +74,8 @@ def build(name, events, pre=0, settled=None, baseline="absent"):
              "shell_integration": True, "last_send_offset": cut}
     if settled is not None:
         state["last_send_settled"] = settled
+    if marker is not None:
+        state["marker_source"] = marker
     if baseline != "absent":
         state["native_baseline"] = baseline
     (path.parent / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -277,6 +279,33 @@ def test_a_hard_wrapped_echo_still_anchors_the_barrier():
         cond = CmdDone("cd11")
         assert cond.evaluate(Ctx()) is False, \
             "once the echo is found, the borrowed C..D cannot be ours"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_tracked_send_waits_for_its_own_echo_even_if_the_file_looks_quiet():
+    """The device race, in one fixture. The recorder was frozen, so `send`'s
+    drain probe saw a flat file and wrote `last_send_settled: true` — but this
+    send is one term-use narrates, so the missing echo is not "nothing lagged",
+    it is our own line still in the pipe. Trusting the quiet file here answered
+    `fact / exit 0` for a `sleep 12` that had not started."""
+    events_lag = [inject("sleep 12"), ("o", C), ("o", D0 + A + B)]
+    root = build("cd12", events_lag, pre=0, settled=True, marker="sentinel")
+    try:
+        cond = CmdDone("cd12")
+        assert cond.evaluate(Ctx()) is False, \
+            "a sentinel send must not fall back to the drain reading"
+        assert cond.degraded == "unattributed-marker", cond.degraded
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    # ... and once the echo lands, the same window answers for our own command.
+    root = build("cd12b", events_lag + [("o", "$ sleep 12\r\n"), ("o", C),
+                                        ("o", D0 + A)],
+                 pre=0, settled=True, marker="sentinel")
+    try:
+        cond = CmdDone("cd12b")
+        assert cond.evaluate(Ctx()) is True, "the echo heals the race"
+        assert cond.degraded is None and cond.exit_code == 0
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
