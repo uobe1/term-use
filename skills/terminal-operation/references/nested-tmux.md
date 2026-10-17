@@ -1,7 +1,6 @@
 # Nested tmux and unmanaged panes
 
-A tmux client running *inside* a term-use pane is drivable directly, with three measured
-gotchas.
+A tmux client running *inside* a term-use pane is drivable directly, with three gotchas.
 
 1. **`$TMUX` blocks the nested client.** tmux refuses to start ("sessions should be nested
    with care, unset $TMUX to force"). Run it as

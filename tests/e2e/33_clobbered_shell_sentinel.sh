@@ -139,4 +139,33 @@ if grep -qi "syntax error" "$TMP/scr.txt"; then
   fail "bash rejected our own suffix: $(cat "$TMP/scr.txt")"
 fi
 
+# --- 7. a program holding the tty is never fed our shell syntax -------------
+# The bug this pins: `python3` in the foreground means the *next* line is program
+# input, and appending `; __tu_ec=$?; printf …` produced a SyntaxError inside
+# python on the device. The proof we use is our own: the last tracked line never
+# reported back, so the shell is not reading.
+$TD send -n "$NAME" --type "cat" --key Enter >/dev/null || fail "send (cat)"
+sleep 0.4
+OUT="$($TD send -n "$NAME" --type 'echo TU_INTO_CAT' --key Enter)" \
+  || fail "send (into cat)"
+printf '%s\n' "$OUT" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+assert r['marker'] == 'paused', r
+assert r['sent']['text'] == 'echo TU_INTO_CAT', f'our suffix reached a program: {r}'
+assert 'never reported back' in (r.get('marker_reason') or ''), r
+" || fail "tracking did not pause for the program holding the tty (see above)"
+$TD send -n "$NAME" --key C-d >/dev/null || fail "send (C-d)"
+$TD wait -n "$NAME" --done --timeout 15 >/dev/null \
+  || fail "the queued cat line never reported back once the program exited"
+$TD send -n "$NAME" --type "echo TU_AFTER" --key Enter >"$TMP/resume.json" \
+  || fail "send (after cat)"
+python3 -c "
+import json
+r = json.load(open('$TMP/resume.json'))
+assert r['marker'] == 'sentinel', f'tracking must resume once the marker arrives: {r}'
+" || fail "tracking never resumed after the program left (see above)"
+$TD wait -n "$NAME" --until 'TU_AFTER' --timeout 10 >/dev/null \
+  || fail "the line after the program never ran"
+
 echo "E2E-33 ok"

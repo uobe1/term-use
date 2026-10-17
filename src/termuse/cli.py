@@ -149,12 +149,10 @@ def cmd_start(args) -> int:
                       hint="pick another -n name or stop the existing session")
     writer = records.V2Writer.fresh(args.name, args.width, args.height,
                                     args.cmd, args.socket)
-    # Shell integration: an *interactive* bash gets the injected rcfile
-    # (OSC 133). Matching only the program name used to silently swallow
-    # `--cmd "bash script.sh"` — the script argument vanished and a bare shell
-    # took its place. Anything that is not a plain interactive bash (a script
-    # operand, a `-c` command string, or the operator's own --rcfile) is left
-    # exactly as asked for.
+    # Shell integration: an *interactive* bash gets the injected rcfile (OSC 133).
+    # Only a bare shell matches: a script operand, a `-c` command string, or the
+    # operator's own --rcfile is left exactly as asked for, because injecting into
+    # those would replace `--cmd "bash script.sh"` with a shell running nothing.
     cmd = args.cmd
     words = cmd.split()
     base = words[0].rsplit("/", 1)[-1] if words else ""
@@ -348,14 +346,25 @@ def cmd_send(args) -> int:
                 marker, marker_reason = waiting.marker_plan(
                     target.session, state, line,
                     enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+                if marker == "sentinel" and not waiting.tracked_line_answered(
+                        target.session, state):
+                    # A tracked line we never saw report back means a program has
+                    # the tty: appending again would feed it shell syntax it
+                    # cannot parse. Stop narrating, say why, and resume as soon as
+                    # the outstanding marker shows up (the REPL exiting hands the
+                    # queued line back to bash, which then runs our printf).
+                    marker = "paused"
+                    marker_reason = ("the last tracked line never reported back, so "
+                                     "something other than the shell holds the tty")
                 if marker == "sentinel":
                     suffix = waiting.sentinel_for(line)
                     # One -l call, not two: the suffix belongs to the line being
                     # typed, and an extra tmux invocation would misreport `calls`
-                    # (the field that shows text and keys stayed separate).
+                    # (the field that shows text and keys were kept separate).
                     texts = (texts[:-1] + [texts[-1] + suffix] if texts
                              else [suffix])
                     sent_text += suffix
+                    state["last_tracked_offset"] = offset
         # Recorded per send, including "none": the wait's diagnosis may call a
         # silent marker channel suspicious only for a send that should have
         # produced a marker. A keys-only submit produces none by design, and
@@ -381,10 +390,10 @@ def cmd_send(args) -> int:
         writer.save_state()
         if sent_text and tdinput.echo_broken(target.session, offset, sent_text):
             warning = "tty-echo-broken"
-    # Say what went in, in the smallest readable form. The event list used to be
-    # returned verbatim: it re-printed the typed text as JSON objects (three sets
-    # of them under `--repeat 3`), which is bytes the caller already paid for and
-    # cannot read back as one line — the one thing this reply is for.
+    # Say what went in, in the smallest readable form. The raw event list is not
+    # that: it re-prints the typed text as JSON objects (three sets of them under
+    # `--repeat 3`), which is bytes the caller already paid for and cannot read
+    # back as one line — the one thing this reply is for.
     summary = {}
     if sent_text:
         summary["text"] = sent_text
@@ -398,7 +407,7 @@ def cmd_send(args) -> int:
     result = {"ok": True, "offset": offset, "sent": summary}
     if marker is not None:
         result["marker"] = marker
-        if marker == "skipped" and marker_reason:
+        if marker in ("skipped", "paused") and marker_reason:
             result["marker_reason"] = marker_reason
     if repeat > 1:
         result["repeat"] = repeat
@@ -432,9 +441,8 @@ def cmd_screen(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     if args.meta:
         # `--meta` is a different question (what is the pane doing) than the
-        # text/grid flags (what is on the screen), and it used to swallow them
-        # silently — an agent that asked for both got half an answer and no
-        # signal that the other half was dropped. Say so instead.
+        # text/grid flags (what is on the screen), and one call cannot answer both.
+        # Returning half an answer with no signal is worse than refusing, so refuse.
         asked = [name for name, val in (
             ("-N", args.keep_trailing), ("--text", args.text), ("-J", args.join),
             ("--scrollback", args.scrollback), ("--grid", args.grid),
@@ -613,11 +621,9 @@ def cmd_wait(args) -> int:
             and records.detect_shell_integration(target.session):
         # `start` can only record what it injected itself. fish >= 4.0 emits the
         # markers on its own, and a shell may carry someone else's integration
-        # (VSCode's 633, WezTerm's 133). --done used to call those targets
-        # "quiet" and advise restarting with --cmd bash while --cmd-done on the
-        # same pane answered fact: believe the stream, and say it early enough
-        # that even an --until verdict's advice stops sending people to a shell
-        # they are already running.
+        # (VSCode's 633, WezTerm's 133). The stream is the authority: believe it,
+        # and say it early enough that even an --until verdict's advice stops
+        # sending people to a shell they are already running.
         state["shell_integration"] = True
         writer.state = state
         writer.save_state()
@@ -651,18 +657,26 @@ def cmd_wait(args) -> int:
         A shell that emits no markers of its own gets the probe with term-use's
         sentinel attached, and the integration gate is skipped for it: the probe
         is what produces the first evidence, so demanding the evidence beforehand
-        would refuse the one session that is about to answer.
+        would refuse the one session that is about to answer. A probe that finds a
+        program holding the tty (an outstanding tracked line that never reported
+        back) is sent without the suffix, so it cannot corrupt that program's
+        input, and the timeout is then the honest `shell-not-ready` signal.
         """
+        probe_offset, probe_settled = records.drain_offset(target.session)
         probe_text = "true"
         probe_marker, _why = waiting.marker_plan(
             target.session, state, probe_text,
             enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+        if probe_marker == "sentinel" and not waiting.tracked_line_answered(
+                target.session, state):
+            probe_marker = "paused"
         if probe_marker == "sentinel":
             probe_text += waiting.sentinel_for(probe_text)
-            state["marker_source"] = "sentinel"
         else:
             require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
-        probe_offset, probe_settled = records.drain_offset(target.session)
+        state["marker_source"] = probe_marker
+        if probe_marker == "sentinel":
+            state["last_tracked_offset"] = probe_offset
         stamp_native_baseline(target, state)
         probe = tdinput.send(target, [probe_text], ["Enter"], [])
         writer.append("i", probe)
@@ -681,9 +695,9 @@ def cmd_wait(args) -> int:
         raise TDError("invalid-arguments",
                       "--since-send reads the raw stream since the last send "
                       "while --scrollback reads screen history — pick one")
-    # Flags that used to be accepted and then quietly not used: a wait that
-    # never reads the screen cannot be widened by --scrollback, and a probe
-    # whose command is literally `true` cannot be expected to return 5.
+    # A flag that is accepted and then not used is indistinguishable from one that
+    # worked: a wait that never reads the screen cannot be widened by --scrollback,
+    # and a probe whose command is literally `true` cannot be expected to return 5.
     if args.scrollback and args.until is None:
         raise TDError("invalid-arguments",
                       f"--scrollback only widens the --until search; "
@@ -1103,8 +1117,8 @@ def cmd_screenshot(args) -> int:
                       f"format", hint="choose a .png path, e.g. "
                                       "screenshot -n NAME -o shot.png")
     # Geometry comes from tmux, not from the capture: a screen that painted
-    # nothing has no content bounds, and cropping to nothing used to crash
-    # the renderer. -N keeps trailing cells so a painted background survives
+    # nothing has no content bounds, and cropping to nothing yields an empty
+    # image. -N keeps trailing cells so a painted background survives
     # to the picture (tmux strips them by default).
     pane = tmuxio.meta(target)
     cols = pane.get("pane_width") or (state or {}).get("width")

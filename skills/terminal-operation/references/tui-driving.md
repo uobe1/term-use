@@ -9,7 +9,7 @@ in a wait-loop.**
 | Shape | Completion | Exit |
 |---|---|---|
 | Program *is* the pane (`start --cmd vim`, incl. `bash script.sh` / `sh -c '…'`) | its death is observable | `wait --exit` (fact; works for non-bash too) |
-| Program inside bash (`send <prog> --key Enter`) | `wait --done` (fact) | the pane always belongs to bash, so `--exit` never fires. "Has it given up the terminal?" is `wait --shell-ready`: it fails with `shell-not-ready` while the program holds the screen — send that program's own quit key, then re-probe. **Do not probe with `pgrep`**: term-use's own recorder is a python3 process, so a process count is never 0 (measured: 4 in a bare session) |
+| Program inside bash (`send <prog> --key Enter`) | `wait --done` (fact) | the pane always belongs to bash, so `--exit` never fires. "Has it given up the terminal?" is `wait --shell-ready`: it fails with `shell-not-ready` while the program holds the screen — send that program's own quit key, then re-probe. **Do not probe with `pgrep`**: term-use's own recorder is a python3 process, so a process count is never 0 |
 | REPL (prompt + eval) | anchor on the prompt, verify results with `out`/`screen -J` | `--shell-ready` after the quit key |
 | Full-screen TUI (alt-screen, repaints) | anchors must be derived from observation | after it exits, the alt-screen restores: stale frames can fake-settle a short quiet and re-match old anchors, so re-verify the screen after any program swap and anchor the *new* program's first paint |
 
@@ -22,12 +22,12 @@ what the program **actually** paints, then wait on that.
 - Good anchors, in rough strength order: dialog text the program prints itself; status-line
   vocabulary that appears in one phase only; prompt shapes (`^>>>`, `^>$`).
 - Bad anchors: substrings of your own input, and text you remember from a *different*
-  program's manual. Every anchor belongs to the program it was measured on — measured
-  drift: nano 9.2's save prompt is `Write to File:`, older nano said `File Name to Write`.
+  program's manual or version — prompts of the same program drift between releases. Anchor
+  on what this pane painted.
 - When an anchor times out, read `evidence.screen` and re-anchor; don't widen the timeout
   first.
-- Set `--timeout` from a first measured run (×3–5 headroom). Raise it for slow cold starts —
-  measured: a Node CLI took ~20s to first paint on a phone.
+- Set `--timeout` from a first run of your own (×3–5 headroom). Cold starts on a phone or a
+  loaded box can take tens of seconds before the first paint.
 
 ## 3. Find the exit path before you need it
 

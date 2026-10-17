@@ -105,34 +105,36 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   all — an rc file that hands bash to a prompt wrapper (blerust and friends) clears
   `PS1`/`PROMPT_COMMAND` and reads lines itself, so no injection can survive it — `send`
   appends `; __tu_ec=$?; printf '\e]133;C\a\e]133;D;%s\a' "$__tu_ec"` to the line it
-  *submits*, and the code reaches the recording as bytes term-use wrote. Three rules keep
+  *submits*, and the code reaches the recording as bytes term-use wrote. Four rules keep
   that honest rather than clever: only a submitting send gets one (a half-typed line is
-  never lengthened), a line whose meaning the suffix could change is refused with a reason
-  (`marker: skipped` — background `&`, dangling pipe, open `then`/`do`, heredoc, comment,
-  unbalanced quote, or a shell that does not speak `$?`), and the verdict says in its
-  `note` that the marker was synthesized and covers the line's last stage only. The reply
-  always carries `marker: shell|sentinel|skipped`, so nothing has to guess from the pane.
+  never lengthened); a line whose meaning the suffix could change is refused with a reason
+  (`skipped` — background `&`, dangling pipe, open `then`/`do`, heredoc, comment,
+  unbalanced quote, or a shell that does not speak `$?`); tracking **pauses** while a
+  program holds the tty — the last tracked line not reporting back is the proof that the
+  shell never consumed it, so the next line is that program's input and appending shell
+  syntax there is corruption; and the verdict says in its `note` that the marker was
+  synthesized and covers the line's last stage only. The reply carries
+  `marker: shell|sentinel|paused|skipped` with a reason, so nothing has to be guessed.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility
 
 tmux is the only hard dependency and the tool leans on its behavior details, so the
-supported line is stated, not implied. **Recommended and the line new work is
-written against: 3.8+** (native command status, which is what makes completion facts
-survive ssh/remote shells and prompt frameworks that rewrite `PROMPT_COMMAND`).
-Minimum: 3.2a, on a self-scanned fallback — the alpha lines move toward 3.8, so a
-capability that only 3.8 can prove is allowed to *degrade* there rather than being
-emulated on ≤3.7c. Do not add a 3.7c-shaped workaround where a 3.8 fact exists, and
-do not let a test's native-channel assertions sit behind a version gate that never
-runs on the dev box: run the suite against both.
+supported line is stated, not implied. **The target line is tmux 3.8+**: native command
+status is what makes completion facts survive ssh/remote shells and prompt frameworks that
+rewrite `PROMPT_COMMAND`. A server without command tracking is a degraded path only — it
+runs on term-use's own `raw.log` scan, can prove a completion only where the recorder had
+drained or the injected text came back as echo, and must degrade (lower confidence, a
+`degraded` marker) rather than emulate. So: never add an emulation-shaped workaround where
+the native field is the fact, and never leave a test's native-channel assertions behind a
+gate the machine under test never passes — run the suite against a 3.8 server.
 
-| tmux | holds |
+| server | holds |
 |---|---|
-| 3.2a – 3.7c | the whole feature set runs on term-use's own `raw.log` scan, which is a fallback and not an equal: it can only prove a completion if the recorder had drained or the injected text came back as echo. The `pane_command_*` group does **not** exist (≤3.7c parses OSC 133 `A`/`C` only and discards `D;<code>`) — and tmux expands *any* unknown format to empty, so `tmuxio.meta()` drops the group when `pane_command_running` comes back empty. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
-| 3.7 / 3.7a / 3.7b / 3.7c | no drift here: `input_osc_133()` is byte-identical, `capture-pane -F` flags (`D H O P W X`) unchanged. `wait-for` has no `-t` and cannot list waiters |
-| 3.8 | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`; fixes the `wait-for` client leak (#5614). term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
+| with command tracking | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`. term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
+| without it | the `pane_command_*` formats expand to empty, so `tmuxio.meta()` drops the whole group. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
 
-Measured on 3.8, because the shape of that channel decides how it is used: `running`
+The shape of that channel decides how it is used: `running`
 is 0/1 whenever the group exists (so it is the presence probe), `status` stays empty
 until the first `D;<code>` marker reaches the pane, and it is filled by markers from
 **any** program in the pane — including a remote shell's, forwarded through ssh. The
@@ -148,7 +150,7 @@ program asking for input), which is why `shell-protocol-unavailable` reports the
 native reading as evidence and names both readings in its hint instead of choosing
 one for the agent.
 
-Two traps, both measured:
+Two traps:
 
 - **tmux exits 0 while failing** (`access not allowed`, `couldn't create directory …`):
   `tmuxio.ok()` — exit 0 *and* clean stderr — is the only success test.
@@ -190,9 +192,8 @@ entry, because an unarchived experiment is a story.
 
 Four rules that came out of running it, not from designing it:
 
-- **k>=2 waves, and quote the mean.** In the a6-vs-a5 round, wave 1 measured −33% wall
-  clock and −23% tokens; wave 2 measured −7% and **+4%**. The spread between waves is
-  bigger than several of the deltas, so a single wave's percentage is noise.
+- **k>=2 waves, and quote the mean.** The spread between waves is bigger than several of
+  the deltas, so a single wave's percentage is noise.
 - **`archive` takes the arm's state dirs.** An arm's `$XDG_STATE_HOME` is a mktemp path
   outside its own tree, and the recordings — the only evidence of what the tool actually
   returned — live there. Record `SOCK`/`TMPD`/wall/tokens in the round JSON too: one

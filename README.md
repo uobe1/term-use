@@ -8,7 +8,7 @@ interface, and every answer arrives with evidence attached.
 
 ![version](https://img.shields.io/badge/version-2.0.0a6-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
-![requires](https://img.shields.io/badge/external%20dep-tmux%203.2a%2b-1BB91F)
+![requires](https://img.shields.io/badge/external%20dep-tmux%203.8%2b-1BB91F)
 ![issues](https://img.shields.io/github/issues/uobe1/term-use)
 ![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
@@ -53,11 +53,11 @@ If the agent can only fetch URLs (not local files), use the raw link instead:
 yourself (CLI + skill); the doc is written so an AI agent or a human can follow it
 end-to-end.
 
-**Requirements:** Python **3.14+** (stdlib only) and **tmux** on `PATH` — 3.2a minimum,
-**3.8+ recommended**: native command status is what keeps completion facts working through
-ssh and through prompt frameworks that rewrite `PROMPT_COMMAND`. Pillow optional
-(screenshots only); a monospace font ships as a last resort, so `screenshot` works on a
-machine with no fonts.
+**Requirements:** Python **3.14+** (stdlib only) and **tmux 3.8+** on `PATH`. tmux 3.8
+tracks the command in each pane itself, which is what lets a completion be answered with
+its exit code as a fact — through ssh, and through prompt frameworks that rewrite
+`PROMPT_COMMAND`. Pillow optional (screenshots only); a monospace font ships as a last
+resort, so `screenshot` works on a machine with no fonts.
 
 ## The agent skill
 

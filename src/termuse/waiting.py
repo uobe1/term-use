@@ -649,6 +649,26 @@ def strip_sentinel(text: str | None) -> str | None:
     return text
 
 
+def tracked_line_answered(session: str, state: dict | None) -> bool:
+    """Did the last sentinel-bearing line report back?
+
+    The question `send` has to ask before lengthening another line: if a program
+    holds the tty (a REPL, `ssh`, a password prompt) our previous line went to
+    *it* as ordinary input, the shell never ran the printf, and appending again
+    would corrupt that program's input — measured on the device, where python
+    answered `true; __tu_ec=$?; …` with a SyntaxError. Our own marker coming back
+    is the only proof that the shell consumed the line: what the foreground
+    process happens to be called answers a different question.
+    """
+    st = state or {}
+    if st.get("marker_source") != "sentinel":
+        return True                      # nothing to prove yet
+    since = st.get("last_tracked_offset")
+    if since is None:
+        return True
+    return records.markers_seen(session, since, kinds=("D",))
+
+
 def marker_plan(session: str, state: dict | None, text: str,
                 enabled: bool = True) -> tuple[str, str | None]:
     """Decide who supplies the completion marker for this send.
@@ -957,10 +977,10 @@ class QuietCondition(Condition):
     def _program_busy(self, meta: dict | None) -> bool:
         """Is a command in flight? True on fact evidence only, in this order.
 
-        tmux 3.8 says `running`, otherwise the absence of `D` after a `C` in our
-        own stream says it. `pane_current_command` is deliberately NOT consulted:
-        measured on 3.7c it fell back to `bash` 1.2s into a `sleep 5`, so as a
-        liveness signal it is a lie at exactly the timescale a settle happens on.
+        tmux's own command tracking says `running`; otherwise a `C` with no `D`
+        since the send says it in our own stream. What is in the foreground is a
+        different question from whether this send completed, and the foreground
+        name cannot answer this one, so it is not consulted here.
         """
         nat = native_state(meta)
         if nat and nat["running"]:

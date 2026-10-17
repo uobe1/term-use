@@ -111,7 +111,7 @@ first send, not a relative path.
 | What did it print? | `out` (since your last send; `--all` for the session) — but after a chained `cmd && cat artifact` the met wait's own `evidence.screen` already holds the answer, so do not also call `out` |
 | Which row is highlighted / what color / is X on screen / where do I click? | `screen --grep --attr reverse` / `--find TEXT` (1-based, click-ready) / `--element-at X Y` |
 | Is anything on screen at all, or did my input never land? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` |
-| Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`), a met `--quiet-ms` says it (`program_running`); `pane_current_command` is only a hint — measured on 3.7c it reported `bash` 1.2s into a `sleep 5` |
+| Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`); a met `--quiet-ms` says it (`program_running`); `screen --meta`'s `pane_command_running` says it when the server tracks commands |
 | How is this frame laid out? | `screenshot` — once |
 | Something else must hold too | add it to the same `wait` (AND; weakest confidence wins) |
 
@@ -135,7 +135,7 @@ first send, not a relative path.
   match the wrapped screen. `~/.../` on screen is the shell's PS1, not term-use — use
   `screen --meta`'s `pane_current_path` for the real cwd.
 - **Confirmation keys**: wait for the prompt text itself before Enter — a key sent early
-  lands in the edit buffer and corrupts state (measured on nano `C-o` + Enter).
+  lands in the edit buffer and corrupts state.
 - **Menu arrows debounce**: `send --key Up --key Up` in one call moves once. One key per
   call ~0.35s apart, or `--repeat 3 --delay 0.35`; verify the highlight landed by re-running
   the `--grep` before Enter. `less`'s search highlight is not `reverse` — pagers need a
@@ -152,8 +152,8 @@ first send, not a relative path.
   extra empty Enter. Prefer one-liners; anchor on the block's result, not the prompts.
 - **A themed shell may not report its own exit code.** `send` answers `marker`: `shell`
   (text untouched), `sentinel` (a wrapper owns the prompt, so term-use appended its own
-  completion printf — `sent.text` is what ran) or `skipped` (the suffix would change what
-  runs — no fact for that line, anchor `--until … --since-send`). Details: `channels.md`.
+  completion printf — `sent.text` is what ran), `paused` (a program holds the tty, so
+  nothing is appended) or `skipped` (the suffix would change what runs — anchor `--until`).
 - **A blank screen is a state**, not an error: `clear`, an exited full-screen program, or a
   quiet daemon. `screenshot` still writes a pane-shaped image and reports `blank: true`.
 - **tmux can exit 0 and still have failed** (a default socket owned by someone else, an
@@ -188,10 +188,10 @@ Do not read these up front — each is for a moment you will recognize:
   alternate-screen handovers. Read it before driving anything you have not already run.
 - `references/nested-tmux.md` — a tmux client inside a term-use pane, `$TMUX`, addressing
   inner panes by socket name, and what degrades on unmanaged panes.
-- `references/tmux-versions.md` — what tmux 3.8+ answers natively (`pane_command_running`,
-  `pane_command_status`), what 3.2a–3.7c cannot answer, and why an absent key is the
-  version answer rather than an empty one. Read it only if you are on 3.8 or the tool's
-  fact waits are behaving oddly.
+- `references/tmux-versions.md` — what the server answers natively (`pane_command_running`,
+  `pane_command_status`), what a server without command tracking cannot answer, and why an
+  absent key is the version answer rather than an empty one. Read it when the tool's fact
+  waits are behaving oddly.
 
 ## Red lines
 

@@ -26,13 +26,20 @@ D0 = "\x1b]133;D;0\x07"
 
 
 def build(name, payloads, cmd="bash"):
-    """A recording + state.json shaped like a live session; returns the temp root."""
+    """A recording + state.json shaped like a live session; returns the temp root.
+
+    A payload is either a bare string (pane output) or an ("i", records) tuple
+    for a client injection, so a fixture can carry the send itself and not just
+    what the pane said back.
+    """
     root = tempfile.mkdtemp(prefix="tu-sentinel-")
     os.environ["XDG_STATE_HOME"] = root
     path = records.session_dir(name) / "raw.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"version": 2, "width": 80, "height": 24, "timestamp": 1.0})]
-    lines += [json.dumps([i * 0.1, "o", p]) for i, p in enumerate(payloads)]
+    for i, payload in enumerate(payloads):
+        code, data = payload if isinstance(payload, tuple) else ("o", payload)
+        lines.append(json.dumps([i * 0.1, code, data]))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (path.parent / "state.json").write_text(json.dumps({
         "session": name, "socket": None, "cmd": cmd,
@@ -138,6 +145,34 @@ def test_the_compound_note_names_the_callers_stage_not_our_suffix():
     note2 = waiting.line_scope(waiting.strip_sentinel(two))
     assert note2 and "make install" in note2 and "printf" not in note2, note2
     assert waiting.strip_sentinel("ls -la") == "ls -la"
+
+
+def _rewrite_state(name, state):
+    path = records.session_dir(name) / "state.json"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_a_tracked_line_that_never_answered_pauses_the_narration():
+    """The guard is our own outstanding marker, not a process name: no marker
+    back means the shell never ran that line, so the next line is the program's
+    input and appending shell syntax to it is corruption."""
+    root = build("s6", [("i", [{"text": "cat"}, {"key": "Enter"}]),
+                       ("o", C), ("o", D0)])
+    try:
+        size = (records.session_dir("s6") / "raw.log").stat().st_size
+        st = records.read_state("s6")
+        st["marker_source"] = "sentinel"
+        st["last_tracked_offset"] = 0
+        _rewrite_state("s6", st)
+        assert waiting.tracked_line_answered("s6", st) is True, "marker did arrive"
+        st["last_tracked_offset"] = size
+        _rewrite_state("s6", st)
+        assert waiting.tracked_line_answered("s6", st) is False, "nothing since"
+        st["marker_source"] = "shell"
+        _rewrite_state("s6", st)
+        assert waiting.tracked_line_answered("s6", st) is True, "nothing to prove"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_the_switch_disables_it_without_lying_about_the_shell():

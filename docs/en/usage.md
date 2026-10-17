@@ -56,13 +56,16 @@ That is the whole loop: **start → send → wait for fact → read the output �
   suffix could change in meaning (a background `&`, a dangling pipe, an open
   `then`/`do`, a heredoc, a comment, an unbalanced quote) and shells that do not
   speak `$?` (fish, csh) are left alone: `marker: skipped` with the reason, and no
-  fact is claimed. `TERM_USE_SENTINEL=0` refuses the append even when it would help.
-- The done-marker oracle has two servers. term-use scans its own recording
-  (`via: osc133`); on **tmux 3.8+** the CLI asks tmux first, and when that is
-  what answered you get `via: tmux-command-status` plus a `channel` key naming
-  it. The native answer is the one that survives a stopped recorder, a prompt
+  fact is claimed. Tracking also **pauses** when the last tracked line never reported
+  back — a REPL or `ssh` holds the tty then, and appending shell syntax to its input
+  would corrupt it; it resumes once that marker finally arrives.
+  `TERM_USE_SENTINEL=0` refuses the append even when it would help.
+- The done-marker oracle has two servers. The CLI asks **tmux** first, and when that is
+  what answered you get `via: tmux-command-status` plus a `channel` key naming it;
+  otherwise term-use scans its own recording (`via: osc133`). The native answer is the
+  one that survives a stopped recorder, a prompt
   framework that rewrites `PROMPT_COMMAND`, and markers forwarded through ssh —
-  which is why 3.8+ is the recommended tmux.
+  which is why tmux 3.8+ is required.
 - When no fact channel can answer, that is said out loud: `--cmd-done` /
   `--shell-ready` / `--done` raise `shell-protocol-unavailable` (the pane's
   foreground is `ssh`/`mosh`/a nested `tmux`, or the injected hooks were
@@ -178,9 +181,8 @@ $TD send -n demo --key Up --repeat 3              # 3 arrows, default 0.35s apar
 $TD send -n demo --key C-c --repeat 2 --delay 0.3 # double-key exit rhythm
 ```
 
-The default `--delay 0.35` is the gap measured to clear real menu debouncing;
-every repetition is a separate `send-keys` call (never merged — merging is what
-menus eat).
+The default `--delay 0.35` is the gap that clears menu debouncing; every repetition is a
+separate `send-keys` call (never merged — merging is what menus eat).
 
 If `send` warns `tty-echo-broken` (your text produced no echo bytes), the
 program mangled the tty — run `fix-tty`.
@@ -206,10 +208,10 @@ picture per layout question, never a series, and never to decide what to type.
 
 ```bash
 $TD screen -n demo --meta                          # cursor, modes, history, blank, stall signals
-#    on tmux 3.8+ also pane_command_running / pane_command_status / pane_command_duration:
+#    plus pane_command_running / pane_command_status / pane_command_duration:
 #    "a command started and has not finished" is fact there, even through ssh — but
 #    running:true also describes a shell merely waiting for input, so read
-#    evidence.screen before acting on it. Absent (not empty) on 3.2a–3.7c.
+#    evidence.screen before acting on it. Absent (not empty) without command tracking.
 $TD screen -n demo --runs                          # SGR attribute runs (token-cheap)
 $TD screen -n demo -J                              # join the lines tmux wrapped at the right edge
 $TD screen -n demo -N                              # keep trailing cells (what a painted background needs)

@@ -51,6 +51,10 @@ is literally `default` (`-n default:inner:0.0`).
     `; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007' "$__tu_ec"`. The line on
     screen is longer than what you wrote, and `sent.text` shows the whole of it — read
     it back before reasoning about what ran.
+  - `paused` + `marker_reason` — the last tracked line never reported back, so a
+    program (a REPL, `ssh`, a password prompt) holds the tty and would otherwise be
+    fed our shell syntax as input. The line goes through verbatim and tracking resumes
+    by itself once the outstanding marker arrives — usually when the program exits.
   - `skipped` + `marker_reason` — the suffix would have changed what runs (a background
     `&`, a dangling pipe or operator, an open `then`/`do`, a heredoc, a trailing comment,
     an unbalanced quote) or the shell does not speak `$?` (fish, csh). That line has no

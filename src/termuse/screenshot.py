@@ -67,8 +67,7 @@ def font_dirs() -> list[str]:
         os.path.expanduser("~/Library/Fonts"),
         "/Library/Fonts",
         "/System/Library/Fonts",
-        # Android system font dir (kept as one convention among many, no
-        # longer first — it used to be the only thing probed)
+        # Android system font dir — one convention among many, not a special case.
         "/system/fonts",
     ]
     return dirs
@@ -263,7 +262,7 @@ def fallback_fonts(primary: str, need: set[str] | None = None,
     picked = [sorted(paths, key=lambda q: (rank_style(os.path.basename(q)), q))[0]
               for _fam, paths in by_family.items()]
     if need is None:
-        # No coverage question asked: keep the old "symbol packs first" order.
+        # No coverage question asked: order symbol packs first.
         scored = [(0 if any(h in os.path.basename(p).lower()
                             for h in ("nerd", "symbols", "unifont")) else 1,
                    os.path.basename(p).lower(), p) for p in picked]
