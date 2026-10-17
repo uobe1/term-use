@@ -64,6 +64,45 @@ def test_allof_json_shape():
     assert j["conditions"][0]["pattern"] == "a"
 
 
+def test_composite_reports_each_member_own_answer():
+    """A timed-out AND used to print `met: false` for the child that *had*
+    matched — the one moment an agent cannot tell which half failed."""
+    ctx = ctx_with("ready\n$ ")
+    combo = AllOf([UntilRegex("ready"), UntilRegex("NEVER")])
+    assert combo.evaluate(ctx) is False
+    by_pattern = {c["pattern"]: c for c in combo.to_json(False)["conditions"]}
+    assert by_pattern["ready"]["met"] is True, by_pattern
+    assert by_pattern["NEVER"]["met"] is False, by_pattern
+
+
+def test_quiet_gate_counts_only_bytes_that_can_paint():
+    """Issue #5: an ink TUI spinning its *window title* holds gate 1 open forever
+    and burns the whole timeout on a screen that never changed. Markers and
+    clipboard reports paint nothing either; a colour change does."""
+    from termuse.waiting import cell_visible
+    assert cell_visible("\x1b]0;spinner-1\x07")[0] == ""
+    assert cell_visible("\x1b]133;D;0\x07\x1b]633;C\x07")[0] == ""
+    assert cell_visible("\x1b]52;c;aGVsbG8=\x07")[0] == ""
+    assert cell_visible("hello\x1b]2;title\x07 world")[0] == "hello world"
+    assert cell_visible("\x1b]10;#ffffff\x07red")[0].startswith("\x1b]10;")
+
+
+def test_quiet_gate_survives_an_osc_split_across_events():
+    from termuse.waiting import cell_visible
+    vis, carry = cell_visible("x\x1b]0;tit")
+    assert (vis, carry) == ("x", "\x1b]0;tit"), (vis, carry)
+    vis, carry = cell_visible("le\x07y", carry)
+    assert (vis, carry) == ("y", ""), (vis, carry)
+
+
+def test_quiet_gate_abandons_an_osc_that_never_ends():
+    """A program that writes `ESC ]` and no terminator must not make the gate
+    re-scan a buffer that grows once per event."""
+    from termuse.waiting import cell_visible
+    vis, carry = cell_visible("data", "\x1b]0;" + "z" * 70000)
+    assert carry == "" and "data" in vis and vis.startswith("\x1b]0;")
+
+
 def test_timeout_evidence_shape():
     ev = timeout_evidence(ctx_with("last screen\n$ "), UntilRegex("NEVER"))
     assert ev["screen"].strip()

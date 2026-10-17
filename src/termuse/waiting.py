@@ -51,6 +51,12 @@ def cell_visible(text: str, carry: str = "") -> tuple[str, str]:
     """
     buf = carry + text
     kept: list[str] = []
+    if len(carry) > 65536:
+        # An OSC that never terminated stopped being a sequence a long time ago.
+        # Hand the bytes back as visible instead of re-scanning a buffer that
+        # grows once per event — the same reason `echo_barrier` windows its tail.
+        kept.append(carry)
+        buf = text
     i = 0
     while True:
         j = buf.find("\x1b]", i)
