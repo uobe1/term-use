@@ -8,6 +8,7 @@ The composite verdict takes the *weakest* confidence of its conditions.
 Timeout never kills the target; it returns an evidence snapshot.
 """
 import re
+import shlex
 import time
 
 from termuse import osc133, records
@@ -523,7 +524,135 @@ def program_is_pane(cmd: str | None) -> bool:
     return not shell_owns_the_pane(cmd)
 
 
-def choose_done_oracle(state: dict | None) -> str:
+# Shells whose `; var=$?; printf` spelling our sentinel can rely on. fish (`$status`),
+# csh/tcsh (`$status`, no `$?`) and anything else are excluded on purpose: appending
+# text they would mis-parse is worse than having no completion marker at all.
+SENTINEL_SHELLS = ("bash", "sh", "dash", "ksh", "zsh", "mksh", "pdksh", "ash",
+                   "busybox", "posh", "lksh")
+
+# The completion sentinel, appended to the line `send` types when the pane's shell
+# emits no OSC 133 of its own — the blerust/starship-takeover class, where the rc
+# file owns the prompt (or the read loop outright) and no injection can survive it.
+# `;` not `&&`: a command that fails is exactly the one whose code matters. Octal
+# `\033`/`\007` because that is the spelling every POSIX printf understands (bash's
+# `\e` is not portable to dash). `__tu_ec` is read first so nothing can clobber
+# `$?` before we do, and C precedes D because a `D` with no `C` reads as aborted.
+SENTINEL = ('; __tu_ec=$?; printf \'\\033]133;C\\007\\033]133;D;%s\\007\' '
+            '"$__tu_ec"')
+
+
+def shell_word(cmd: str | None) -> str:
+    """The shell a pane's command line actually execs, past wrappers and VAR=val.
+
+    `start` rewrites zsh into `env ZDOTDIR=… zsh` and bash into
+    `bash --rcfile … -i`, so the first word is often not the shell.
+    """
+    try:
+        words = shlex.split(str(cmd or ""))
+    except ValueError:
+        words = str(cmd or "").split()
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if "=" in w and not w.startswith("-"):
+            i += 1                       # VAR=value prefix
+            continue
+        base = w.rsplit("/", 1)[-1]
+        if base in ("env", "command", "exec", "time", "nohup", "nice", "stdbuf"):
+            i += 1
+            continue
+        return base
+    return ""
+
+
+def sentinel_possible(state: dict | None) -> bool:
+    """Is this pane's shell one our sentinel is safe and worth appending to?"""
+    return shell_word((state or {}).get("cmd")) in SENTINEL_SHELLS
+
+
+def sentinel_refusal(text: str) -> str | None:
+    """Why the sentinel cannot follow this line, or None when it can.
+
+    The suffix is *typed*, so it must not change what runs. An incomplete command
+    (a dangling pipe or operator, an open block, a heredoc, a continuation
+    backslash, an unbalanced quote) would take our text as its own continuation —
+    `if x; then` plus our marker runs the printf as the then-branch — and a
+    trailing comment would swallow the marker whole, leaving a wait that can never
+    be satisfied. Refuse those, say why, and let the caller keep its line.
+    """
+    if not text or not text.strip():
+        return "nothing was typed"
+    if "\n" in text.rstrip("\n"):
+        return "several lines were typed at once"
+    bare = unquoted(text)
+    if re.search(r"(^|\s)#", text):
+        return "the line carries a comment, which would eat the marker"
+    if "<<" in bare:
+        return "a heredoc body is still to come"
+    if text.rstrip().endswith("\\"):
+        return "the line continues onto the next one"
+    for q in ("'", '"', "`"):
+        if text.count(q) % 2:
+            return f"an unbalanced {q!r} means the line is not finished"
+    for a, b in (("(", ")"), ("{", "}")):
+        if bare.count(a) != bare.count(b):
+            return f"an unbalanced {a} leaves the command open"
+    words = bare.split()
+    opens = sum(1 for w in words if w in ("then", "do"))
+    closes = sum(1 for w in words if w in ("fi", "done", "esac"))
+    if opens != closes:
+        return "an open block (then/do without its fi/done) is not a finished command"
+    tail = bare.rstrip()
+    if tail.endswith(("&&", "||", "|", "&")):
+        return "a background job or a dangling operator reports no completion of its own"
+    if tail.endswith(("<", ">", "=")):
+        return "the line ends mid-redirection"
+    return None
+
+
+def sentinel_for(line: str) -> str:
+    """The suffix to append to `line` — without ever producing a `;;`.
+
+    A caller that typed `cd /tmp;` already ended its command; adding the
+    sentinel's own separator would make bash choke on a syntax error, which is a
+    worse outcome than the missing marker we were trying to fix.
+    """
+    return SENTINEL[1:] if line.rstrip().endswith(";") else SENTINEL
+
+
+def marker_plan(session: str, state: dict | None, text: str,
+                enabled: bool = True) -> tuple[str, str | None]:
+    """Decide who supplies the completion marker for this send.
+
+    "shell"    — the pane already emits markers (ours or someone else's: fish,
+                 VSCode's 633, a user integration), so the line is left exactly as
+                 typed;
+    "sentinel" — a managed POSIX shell whose recent stream carries no markers at
+                 all: append ours, or the alternative is no fact level whatsoever;
+    "skipped"  — the line cannot carry the suffix safely (see `sentinel_refusal`).
+
+    The stream, not `start`'s launch-time guess, is the authority — and only the
+    shell's *own* evidence counts: `records.shell_markers_proven` looks for prompt
+    markers plus a done marker, because our sentinel would otherwise certify a dead
+    shell as integrated after the first line we had to narrate ourselves.
+    """
+    if state is None:
+        return "skipped", "no records cover this pane, so nothing is tracked"
+    if not text:
+        return "skipped", "nothing was typed"
+    if not enabled:
+        return "skipped", "disabled by TERM_USE_SENTINEL"
+    if records.shell_markers_proven(session):
+        return "shell", None
+    if not sentinel_possible(state):
+        return "skipped", "this shell is not one the sentinel can be written for"
+    reason = sentinel_refusal(text)
+    if reason:
+        return "skipped", reason
+    return "sentinel", None
+
+
+def choose_done_oracle(state: dict | None, trackable: bool = False) -> str:
     """Which oracle `wait --done` should use for this target.
 
     An oracle is named only when its evidence actually exists — the whole
@@ -534,6 +663,11 @@ def choose_done_oracle(state: dict | None) -> str:
     `detect_shell_integration()` and persists it before calling this, which
     is how fish >= 4.0 and someone else's OSC 633 integration stop being
     offered "quiet" plus advice to restart in a shell they are already in.
+
+    `trackable` is the same kind of outside evidence: a managed POSIX shell that
+    emits nothing can still be asked, because the `true` probe carries term-use's
+    own completion sentinel — so it gets a fact oracle instead of sampling. A
+    program that *is* the pane is checked first: pane death outranks any marker.
     """
     if state is None:
         return "quiet-unmanaged"          # no records: screen stability only
@@ -541,6 +675,13 @@ def choose_done_oracle(state: dict | None) -> str:
         return "probe" if not state.get("last_send_offset") else "osc133"
     if program_is_pane(state.get("cmd")):
         return "pane-exit"
+    if trackable:
+        # A shell that cannot report for itself can still be *asked*: the `true`
+        # probe carries term-use's own sentinel, so a fact channel exists even
+        # where the rc file owns the prompt. (Once any marker is in the stream —
+        # ours or the shell's — `cmd_wait` has already recorded the session as
+        # integrated and the branch above answers instead.)
+        return "probe"
     return "quiet"
 
 
@@ -839,13 +980,18 @@ def _managed_shell(state: dict | None) -> str:
 
 def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
                        since_offset: int, ctx=None,
-                       after_timeout: bool = False) -> TDError | None:
+                       after_timeout: bool = False,
+                       trackable: bool = False) -> TDError | None:
     """Name the reason a shell-protocol wait can never be satisfied, if there is one.
 
     Three states look alike from the outside and need different answers: the
     command is still running (wait), the marker channel is dead (change channel),
     the session is wedged (reconnect). Without this, the second one is reported
     as the first and the hint pushes agents into the third.
+
+    `trackable` suppresses the dead-channel claim for a shell `send` can narrate
+    itself: not one marker has arrived yet, but the sentinel will make one, so
+    refusing before the wait would refuse a channel that works.
     """
     fg = str((meta or {}).get("pane_current_command") or "")
     nat = native_state(meta)
@@ -906,16 +1052,22 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
             evidence=ev())
     if state is not None and state.get("shell_integration"):
         if (not records.markers_seen(session, 0, kinds=("C", "D"))
-                and not nat_has_evidence):
+                and not nat_has_evidence and not trackable):
             return TDError(
                 "shell-protocol-unavailable",
                 f"session {session!r} was given shell integration but has emitted "
                 f"no command markers at all",
                 hint="the shell's own startup files likely replaced the injected "
                      "hooks (starship/powerline rewrite PROMPT_COMMAND every "
-                     "prompt). Use --until 'regex' --since-send or print your own "
-                     "sentinel; `trace -n " + session + " --format json` shows "
-                     "what actually came through.",
+                     "prompt). The other shape is an rc file that takes over the "
+                     "read loop itself — a prompt wrapper that clears PS1 and "
+                     "PROMPT_COMMAND and reads lines in its own program (blerust, "
+                     "some instant-prompt setups) — and then no marker can ever "
+                     "be emitted, because bash never runs its own prompt cycle. "
+                     "Start the shell with its wrapper disabled (the rc files "
+                     "usually guard on an env var), or use --until 'regex' "
+                     "--since-send or print your own sentinel; `trace -n " + session +
+                     " --format json` shows what actually came through.",
                 evidence=ev())
         if (fg in ("", _managed_shell(state))
                 and not records.markers_seen(session, since_offset)

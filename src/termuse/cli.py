@@ -329,6 +329,31 @@ def cmd_send(args) -> int:
             body = body[:-1]
         sent_text += body
     texts = list(args.type or []) + ([body] if args.type_file else [])
+    # Who supplies the completion marker for this line — decided only for a send
+    # that *submits* one, because a half-typed line must not be lengthened (the
+    # buffer it sits in is the caller's business, and `--key Enter` may never come).
+    # The skill's documented split send (type, then Enter) is covered by reading the
+    # pending line back from the recording, so the marker follows the command that
+    # actually runs. A shell whose rc file handed the prompt to a wrapper emits no
+    # OSC 133 at all (measured on the reporter's device); there term-use appends its
+    # own sentinel and the result says so, because a line longer than the caller
+    # wrote is not something to discover from the pane afterwards.
+    submitting = any(str(k).lower() in records.SUBMIT_KEYS
+                     for k in (args.key or []))
+    marker = marker_reason = None
+    if writer is not None and submitting:
+        line = "".join(texts) or (records.pending_input(target.session, 0) or "")
+        if line:
+            marker, marker_reason = waiting.marker_plan(
+                target.session, state, line,
+                enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+            if marker == "sentinel":
+                suffix = waiting.sentinel_for(line)
+                texts = texts + [suffix]
+                sent_text += suffix
+                state["marker_source"] = "sentinel"
+            elif marker == "shell":
+                state["marker_source"] = "shell"
     warning = None
     events: list[dict] = []
     for i in range(repeat):
@@ -363,6 +388,10 @@ def cmd_send(args) -> int:
         summary["hex"] = hexes
     summary["calls"] = len(events)
     result = {"ok": True, "offset": offset, "sent": summary}
+    if marker is not None:
+        result["marker"] = marker
+        if marker == "skipped" and marker_reason:
+            result["marker_reason"] = marker_reason
     if repeat > 1:
         result["repeat"] = repeat
     if warning:
@@ -595,6 +624,13 @@ def cmd_wait(args) -> int:
     # Built before the conditions: --done's early "this channel cannot answer"
     # check wants screen evidence, and it runs while the oracle is being chosen.
     ctx = waiting.WaitContext(capture, pane_meta)
+    # Can `send` narrate this shell itself? Computed once, because the oracle
+    # choice and the early "this channel cannot answer" refusal must not disagree
+    # about whether a fact channel exists: refusing a pane that could be probed is
+    # exactly the dead-end this round was written to close.
+    pane_trackable = (state is not None
+                      and waiting.sentinel_possible(state)
+                      and os.environ.get("TERM_USE_SENTINEL") != "0")
     conditions: list = []
     managed = state is not None
     via: str | None = None
@@ -602,11 +638,25 @@ def cmd_wait(args) -> int:
 
     def inject_probe() -> None:
         """The `true` probe (the skill's standard loop, internalized): text
-        and Enter are separate send-keys calls (the split-send red line)."""
-        require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
+        and Enter are separate send-keys calls (the split-send red line).
+
+        A shell that emits no markers of its own gets the probe with term-use's
+        sentinel attached, and the integration gate is skipped for it: the probe
+        is what produces the first evidence, so demanding the evidence beforehand
+        would refuse the one session that is about to answer.
+        """
+        probe_text = "true"
+        probe_marker, _why = waiting.marker_plan(
+            target.session, state, probe_text,
+            enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+        if probe_marker == "sentinel":
+            probe_text += waiting.sentinel_for(probe_text)
+            state["marker_source"] = "sentinel"
+        else:
+            require_shell_integration(target, state, wait_s=min(args.timeout, 5.0))
         probe_offset, probe_settled = records.drain_offset(target.session)
         stamp_native_baseline(target, state)
-        probe = tdinput.send(target, ["true"], ["Enter"], [])
+        probe = tdinput.send(target, [probe_text], ["Enter"], [])
         writer.append("i", probe)
         state["last_send_offset"] = probe_offset
         state["last_send_settled"] = probe_settled
@@ -657,12 +707,12 @@ def cmd_wait(args) -> int:
         # not have to know which of our channels its pane can satisfy.
         dead = waiting.protocol_diagnosis(target.session, state, pane_meta(),
                                           (state or {}).get("last_send_offset", 0),
-                                          ctx)
+                                          ctx, trackable=pane_trackable)
         if dead is not None and state is not None:
             # A passthrough foreground or a silent channel is knowable now;
             # burning the timeout on it teaches agents to distrust waits.
             raise dead
-        oracle = waiting.choose_done_oracle(state)
+        oracle = waiting.choose_done_oracle(state, trackable=pane_trackable)
         via = waiting.DONE_VIA[oracle]
         if oracle == "probe":
             if args.expect_code is not None:
@@ -794,6 +844,16 @@ def cmd_wait(args) -> int:
                 if scope:
                     verdict["note"] = (f"{verdict['note']} {scope}"
                                        if verdict.get("note") else scope)
+            if code is not None and managed \
+                    and (state or {}).get("marker_source") == "sentinel":
+                # The number is a fact, but not the shell's own confession: say so,
+                # or an agent reads it as evidence about the user's integration.
+                verdict["note"] = ((verdict.get("note", "") +
+                                    " The completion marker here is term-use's own "
+                                    "sentinel — this shell emits no OSC 133, so the "
+                                    "code is `$?` read by the printf appended to your "
+                                    "line, and it covers its last stage only."
+                                    ).strip())
             print(json.dumps(verdict, ensure_ascii=False))
             tdbudget.warn(verdict_ctx, target.session)
             return 0
