@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from termuse.errors import TDError
-from termuse.waiting import CmdDone
+from termuse.waiting import CmdDone, echo_barrier
 
 C = "\x1b]133;C\x07"
 D0 = "\x1b]133;D;0\x07"
@@ -254,6 +254,31 @@ def test_expect_code_mismatch_fails_immediately_on_either_channel():
                 raise AssertionError(f"mismatch must raise ({channel})")
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_hard_wrapped_echo_still_anchors_the_barrier():
+    # Measured on the device: a wrapper's readline breaks the echoed line where
+    # the cursor happens to sit — inside a token — so a match that tolerates only
+    # collapsed whitespace misses our own echo, falls back to "the file was
+    # quiet", and reports the borrowed pair as a fact.
+    line = "printf '" + "a" * 32 + "'"
+    nl, cr = chr(10), chr(13)
+    wrapped = ("$ " + line[:15] + nl + line[15:26] + nl + line[26:] + cr + nl)
+    assert wrapped.count("a") == 32
+    root = build("cd11", [inject(line),
+                          ("o", C), ("o", D0 + A),
+                          ("o", wrapped)],
+                 pre=0, settled=True)
+    try:
+        from termuse import records
+        off = records.read_state("cd11")["last_send_offset"]
+        assert echo_barrier("cd11", off, line), \
+            "a hard line break inside a token must not hide our echo"
+        cond = CmdDone("cd11")
+        assert cond.evaluate(Ctx()) is False, \
+            "once the echo is found, the borrowed C..D cannot be ours"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

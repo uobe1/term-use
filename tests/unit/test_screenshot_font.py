@@ -109,6 +109,11 @@ def test_font_dirs_follows_conventions_not_one_device():
             os.environ.pop("TERM_USE_FONT_DIRS", None)
             os.environ["PREFIX"] = os.path.join(tmp, "prefix")
             os.environ["XDG_DATA_HOME"] = os.path.join(tmp, "xdg")
+            # HOME is overridden too: on a real Termux device $HOME *is* under
+            # com.termux, so asserting that substring never appears tests the
+            # machine instead of the code. What must not appear is the hardcoded
+            # default, so no probe input may come from the real environment.
+            os.environ["HOME"] = os.path.join(tmp, "home")
             dirs = tdscreenshot.font_dirs()
             assert os.path.join(tmp, "prefix", "share", "fonts") in dirs, dirs
             assert os.path.join(tmp, "xdg", "fonts") in dirs, dirs

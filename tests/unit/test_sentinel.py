@@ -126,6 +126,20 @@ def test_a_line_ending_in_a_semicolon_does_not_get_a_double_one():
     assert waiting.sentinel_refusal("cd /tmp;") is None, "a complete line stays markable"
 
 
+def test_the_compound_note_names_the_callers_stage_not_our_suffix():
+    """`line_scope` reads the recorded injection, which now includes our own
+    `; __tu_ec=$?; printf …`. Quoting that back as "the command the exit code
+    came from" blames the caller's `;` for text term-use appended."""
+    line = "deploy.py init; " + waiting.sentinel_for("deploy.py init; ")
+    assert waiting.strip_sentinel(line) == "deploy.py init; "
+    note = waiting.line_scope(waiting.strip_sentinel(line))
+    assert note and "deploy.py init" in note and "printf" not in note, note
+    two = "make && make install" + waiting.SENTINEL
+    note2 = waiting.line_scope(waiting.strip_sentinel(two))
+    assert note2 and "make install" in note2 and "printf" not in note2, note2
+    assert waiting.strip_sentinel("ls -la") == "ls -la"
+
+
 def test_the_switch_disables_it_without_lying_about_the_shell():
     root = build("s4", ["Welcome\n"])
     try:

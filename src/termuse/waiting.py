@@ -235,10 +235,17 @@ class AllOf(Condition):
                                for c in self.conditions]}
 
 
-def _norm_ws(text: str) -> str:
-    """Collapse every whitespace run to one space, so an echo can be matched
-    against typed text without betting on how the line editor repainted it."""
-    return " ".join(str(text).split())
+def _squeeze(text: str) -> str:
+    """Drop whitespace entirely — the shape the echo comparison needs.
+
+    A prompt wrapper redraws a long line with a hard break wherever the cursor
+    happens to sit, which can fall *inside a token*: the device echoed
+    `printf '\\0`↵`33]133;C…'`, and no amount of collapsing turns that back into
+    `printf '\033...`. Matching on the whitespace-free text is what survives it;
+    the probe is a whole command line, so a cross-token accident is not a live
+    risk, while a missed barrier silently costs the caller its fact channel.
+    """
+    return "".join(str(text).split())
 
 
 def echo_barrier(session: str, offset: int, text: str) -> int | None:
@@ -251,7 +258,7 @@ def echo_barrier(session: str, offset: int, text: str) -> int | None:
     None while the echo has not reached the recording yet — the caller polls, so
     it turns into a barrier on the next pass.
     """
-    probe = _norm_ws(text)
+    probe = _squeeze(text)
     if len(probe) < 3:
         return None
     window = ""
@@ -259,7 +266,7 @@ def echo_barrier(session: str, offset: int, text: str) -> int | None:
         if code != "o" or not isinstance(data, str):
             continue
         window = (window + data)[-32768:]
-        if probe in _norm_ws(screen_mod.visible_text(window)):
+        if probe in _squeeze(screen_mod.visible_text(window)):
             return pos
     return None
 
@@ -618,6 +625,22 @@ def sentinel_for(line: str) -> str:
     worse outcome than the missing marker we were trying to fix.
     """
     return SENTINEL[1:] if line.rstrip().endswith(";") else SENTINEL
+
+
+def strip_sentinel(text: str | None) -> str | None:
+    """`text` with an appended completion sentinel removed.
+
+    The note naming "the command this exit code came from" describes the line the
+    caller wrote; our own printf is not a stage of their command, and quoting it
+    back would blame the caller's `;` for something term-use added.
+    """
+    if not text:
+        return text
+    for suffix in (SENTINEL, SENTINEL[1:]):
+        i = text.find(suffix)
+        if i >= 0:
+            return text[:i]
+    return text
 
 
 def marker_plan(session: str, state: dict | None, text: str,
@@ -1071,7 +1094,12 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
                 evidence=ev())
         if (fg in ("", _managed_shell(state))
                 and not records.markers_seen(session, since_offset)
+                and (state or {}).get("marker_source") in (None, "shell", "sentinel")
                 and (records.output_age_s(session) or 0) > 1.0):
+            # Only a send that was supposed to make a marker can be diagnosed as
+            # "the channel died": a keys-only submit or a refused sentinel
+            # produces none by design, and calling that a stolen
+            # PROMPT_COMMAND sends an agent hunting a framework that is fine.
             # PS0 emits C and PROMPT_COMMAND emits D, so a framework that took
             # PROMPT_COMMAND back leaves exactly the same mark as a shell blocked
             # on `read`: a C with no D and a quiet pane. Markers alone cannot

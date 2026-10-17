@@ -51,9 +51,12 @@ import json
 v = json.load(open(__import__("sys").argv[1]))
 assert v["verdict"] == "met" and v["confidence"] == "fact", v
 assert v.get("exit_code") == 0, v
-assert v.get("via") == "osc133", v
+# which server saw it depends on the tmux in front of us: our sentinel's markers
+# are parsed by tmux 3.8 too, so either channel is a correct answer
+assert v.get("via") in ("osc133", "tmux-command-status"), v
 note = v.get("note") or ""
-assert "sentinel" in note, f"the verdict must say where the marker came from: {note}"
+assert "sentinel" in note, f"the verdict must say the marker was synthesized: {note}"
+assert "printf" not in note, f"the note must name the caller's stage, not our suffix: {note}"
 st = json.load(open(__import__("sys").argv[2]))
 assert st.get("marker_source") == "sentinel", st
 assert st.get("shell_integration") is True, st  # the stream proved it, not the launch guess

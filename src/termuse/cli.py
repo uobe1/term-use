@@ -341,19 +341,27 @@ def cmd_send(args) -> int:
     submitting = any(str(k).lower() in records.SUBMIT_KEYS
                      for k in (args.key or []))
     marker = marker_reason = None
-    if writer is not None and submitting:
-        line = "".join(texts) or (records.pending_input(target.session, 0) or "")
-        if line:
-            marker, marker_reason = waiting.marker_plan(
-                target.session, state, line,
-                enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
-            if marker == "sentinel":
-                suffix = waiting.sentinel_for(line)
-                texts = texts + [suffix]
-                sent_text += suffix
-                state["marker_source"] = "sentinel"
-            elif marker == "shell":
-                state["marker_source"] = "shell"
+    if writer is not None:
+        if submitting:
+            line = "".join(texts) or (records.pending_input(target.session, 0) or "")
+            if line:
+                marker, marker_reason = waiting.marker_plan(
+                    target.session, state, line,
+                    enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+                if marker == "sentinel":
+                    suffix = waiting.sentinel_for(line)
+                    # One -l call, not two: the suffix belongs to the line being
+                    # typed, and an extra tmux invocation would misreport `calls`
+                    # (the field that shows text and keys stayed separate).
+                    texts = (texts[:-1] + [texts[-1] + suffix] if texts
+                             else [suffix])
+                    sent_text += suffix
+        # Recorded per send, including "none": the wait's diagnosis may call a
+        # silent marker channel suspicious only for a send that should have
+        # produced a marker. A keys-only submit produces none by design, and
+        # blaming the prompt framework for that is the over-claim that once told
+        # a tester to interrupt an idle, healthy remote shell.
+        state["marker_source"] = marker or "none"
     warning = None
     events: list[dict] = []
     for i in range(repeat):
@@ -839,8 +847,9 @@ def cmd_wait(args) -> int:
                 # …and on a compound line that one number owes an explanation of
                 # *which part* of the line it describes. --cmd-done is the same
                 # fact from the same single number, so it gets the same caveat.
-                scope = waiting.line_scope(records.last_sent_text(
-                    target.session, (state or {}).get("last_send_offset", 0)))
+                scope = waiting.line_scope(waiting.strip_sentinel(
+                    records.last_sent_text(
+                        target.session, (state or {}).get("last_send_offset", 0))))
                 if scope:
                     verdict["note"] = (f"{verdict['note']} {scope}"
                                        if verdict.get("note") else scope)
