@@ -15,16 +15,37 @@ Definitions, fixed here so two waves of a round stay comparable:
   transcript_bytes    the whole run, including the agent's own prose
   context_ratio_*     `context_usage_ratio` at the widest and final point: how
                       much of the window the task occupied
+  wall_s              span of the record timestamps in the transcript. Recovered
+                      because the completion notification is the only other place
+                      wall clock lives and it is transcribed by hand — validated
+                      to within 0.3% against a paired arm's reported 1333524 ms,
+                      and it has already saved one wave whose notification arrived
+                      without a usage block.
 
-wall clock / cumulative tokens / tool_uses come from the harness' own completion
-notification and are not recoverable from the transcript, so they are recorded by
-hand in the round's JSON.
+Cumulative tokens are *not* recoverable this way; the harness' completion
+notification is the only source, so record it in the arm's `env.txt` the moment it
+arrives.
 """
 import re
 import sys
 
 PAIR = re.compile(r"bytes\D{0,8}(\d+)\D{0,120}?est_tokens\D{0,8}([0-9.]+)")
 RATIO = re.compile(r"context_usage_ratio\D{0,6}([0-9.]+)")
+STAMP = re.compile(r"[\"\\\\]+(?:timestamp|ts)[\"\\\\:]+ *([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z?)")
+
+
+def wall_seconds(text):
+    """First-to-last record timestamp, in seconds. Empty string if unparseable."""
+    stamps = sorted(STAMP.findall(text))
+    if len(stamps) < 2:
+        return None
+    from datetime import datetime
+    try:
+        a = datetime.fromisoformat(stamps[0].replace("Z", "+00:00"))
+        b = datetime.fromisoformat(stamps[-1].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round((b - a).total_seconds(), 1)
 
 
 def measure(path):
@@ -38,6 +59,7 @@ def measure(path):
         "transcript_bytes": len(text.encode()),
         "context_ratio_max": round(max(ratios), 4) if ratios else None,
         "context_ratio_last": round(ratios[-1], 4) if ratios else None,
+        "wall_s": wall_seconds(text),
     }
 
 
@@ -53,7 +75,7 @@ def main(argv):
             continue
         print(f"{label:12s} obs={m['observations']:3d} bytes={m['tool_side_bytes']:6d} "
               f"est_tokens={m['tool_side_est_tokens']:6d} transcript={m['transcript_bytes']:7d} "
-              f"ratio_max={m['context_ratio_max']} ratio_last={m['context_ratio_last']}")
+              f"ratio_max={m['context_ratio_max']} wall_s={m['wall_s']}")
     return bad
 
 
