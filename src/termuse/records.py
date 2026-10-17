@@ -198,6 +198,25 @@ def pending_input(session: str, since_offset: int) -> str | None:
     return typed or None
 
 
+def last_sent_text(session: str, since_offset: int) -> str | None:
+    """The text of the newest complete injection at or after that offset.
+
+    `pending_input` answers "what is still sitting in the buffer"; this answers
+    "what did the agent ask the shell to run", which is what an exit code has to
+    be interpreted against. Keys are ignored — a line is its typed text.
+    """
+    last = None
+    for _ts, code, data, _pos in events_since(session, since_offset):
+        if code != "i" or not isinstance(data, list):
+            continue
+        text = "".join(ev["text"] for ev in data
+                       if isinstance(ev, dict) and "text" in ev)
+        if any(isinstance(ev, dict) and str(ev.get("key", "")).lower()
+               in ("enter", "c-m", "c-j", "m-enter") for ev in data):
+            last = text or None
+    return last
+
+
 class V2Writer:
     """Appends events to raw.log and persists state.json atomically."""
 

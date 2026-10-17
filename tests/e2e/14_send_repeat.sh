@@ -20,8 +20,8 @@ selected() { $TD screen -n "$NAME" | grep -o 'SELECTED:[0-9]*'; }
 
 $TD start -n "$NAME" --cmd bash --socket "$SOCK" --width 100 --height 30 >/dev/null \
   || fail "start failed"
-$TD send -n "$NAME" --type "python3 $ROOT/tests/fixtures/menu_debounce.py" --key Enter >/dev/null \
-  || fail "send fixture failed"
+$TD send -n "$NAME" --type "python3 $ROOT/tests/fixtures/menu_debounce.py" --key Enter \
+  >"$TMP/first.json" || fail "send fixture failed"
 $TD wait -n "$NAME" --until 'SELECTED:0' --timeout 10 >/dev/null || fail "fixture never started"
 
 # --- control: one call with two Ups is debounced to a single move ---
@@ -31,11 +31,28 @@ sleep 1
 
 # --- --repeat 2 --delay 0.6: each repetition is a full independent send ---
 BEFORE="$(grep -o '"key": "Up"' "$XDG_STATE_HOME/term-use/$NAME/raw.log" | wc -l)"
-$TD send -n "$NAME" --key Up --repeat 2 --delay 0.6 >/dev/null || fail "send --repeat failed"
+$TD send -n "$NAME" --key Up --repeat 2 --delay 0.6 >"$TMP/repeat.json" \
+  || fail "send --repeat failed"
 sleep 2
 [ "$(selected)" = "SELECTED:3" ] || fail "--repeat 2 --delay 0.6 should move twice, got: $(selected)"
 AFTER="$(grep -o '"key": "Up"' "$XDG_STATE_HOME/term-use/$NAME/raw.log" | wc -l)"
 [ "$((AFTER - BEFORE))" -eq 2 ] || fail "expected 2 i-event Up records, got $((AFTER - BEFORE))"
+
+# --- the reply must be readable, not a re-print of the event list ---
+# `sent` used to carry the raw i-events: the typed text as JSON objects, twice
+# over under --repeat 2. The caller cannot check "what went in" from that, and
+# it is bytes it already paid.
+python3 -c "
+import json
+first = json.load(open('$TMP/first.json'))
+s = first['sent']
+assert s['text'].endswith('menu_debounce.py') and s['keys'] == ['Enter'], first
+assert s['calls'] == 2, first
+assert 'repeat' not in first, f'--repeat 1 must not print a constant: {first}'
+rep = json.load(open('$TMP/repeat.json'))
+assert 'text' not in rep['sent'] and rep['sent']['keys'] == ['Up', 'Up'], rep
+assert rep['sent']['calls'] == 2 and rep['repeat'] == 2, rep
+" || fail "send's reply shape (see above)"
 
 # --- red line: each repetition must stay text/key separated (works at all) ---
 $TD send -n "$NAME" --key Down --repeat 1 >/dev/null || fail "repeat 1 failed"

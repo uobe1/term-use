@@ -292,7 +292,23 @@ def cmd_send(args) -> int:
         writer.save_state()
         if sent_text and tdinput.echo_broken(target.session, offset, sent_text):
             warning = "tty-echo-broken"
-    result = {"ok": True, "sent": events, "offset": offset, "repeat": repeat}
+    # Say what went in, in the smallest readable form. The event list used to be
+    # returned verbatim: it re-printed the typed text as JSON objects (three sets
+    # of them under `--repeat 3`), which is bytes the caller already paid for and
+    # cannot read back as one line — the one thing this reply is for.
+    summary = {}
+    if sent_text:
+        summary["text"] = sent_text
+    keys = [ev["key"] for ev in events if "key" in ev]
+    if keys:
+        summary["keys"] = keys
+    hexes = [ev["hex"] for ev in events if "hex" in ev]
+    if hexes:
+        summary["hex"] = hexes
+    summary["calls"] = len(events)
+    result = {"ok": True, "offset": offset, "sent": summary}
+    if repeat > 1:
+        result["repeat"] = repeat
     if warning:
         result["warning"] = warning
     print(json.dumps(result, ensure_ascii=False))
@@ -679,6 +695,14 @@ def cmd_wait(args) -> int:
                 # The exit code belongs at the top level for --done: the whole
                 # question an agent is asking is "did it finish, and how".
                 verdict["exit_code"] = _exit_code_of(conditions)
+                if verdict["exit_code"] is not None and managed:
+                    # …and on a compound line it owes an explanation of *which
+                    # part* of the line that number describes.
+                    scope = waiting.line_scope(records.last_sent_text(
+                        target.session, (state or {}).get("last_send_offset", 0)))
+                    if scope:
+                        verdict["note"] = (f"{verdict['note']} {scope}"
+                                           if verdict.get("note") else scope)
             print(json.dumps(verdict, ensure_ascii=False))
             tdbudget.warn(verdict_ctx, target.session)
             return 0

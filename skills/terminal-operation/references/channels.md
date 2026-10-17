@@ -33,6 +33,9 @@ is literally `default` (`-n default:inner:0.0`).
   key names only and errors with the table if you try something else.
 - The result carries `offset`: the byte position in `raw.log` where this send's output
   begins. That is what `--done`/`--cmd-done` and `--since-send` scope to.
+- `sent` summarizes what went in — `{text, keys, calls}` (`calls` = tmux invocations, so
+  text and keys are visibly separate). It is a summary, not the pane's echo: to check
+  what the pane *received*, read `out` or the next wait's `evidence.screen`.
 - Warns `tty-echo-broken` when your text produced no echo bytes (the program mangled the
   tty — run `fix-tty`).
 
@@ -58,7 +61,10 @@ completion** |
 | `--scrollback N` | — | widens the `--until` search into history only; refused with other oracles |
 
 Verdict shape: `{verdict, confidence, conditions[], evidence{screen,…}, context, via,
-channel, advice?, exit_code?}`. Composite verdicts take the weakest member's confidence.
+channel, advice?, exit_code?, note?}`. Composite verdicts take the weakest member's
+confidence. A `note` on a met `--done` means your line was compound (`;`, `&&`, `|`, `&`):
+the one `exit_code` describes only part of it, and the note says which part. A `;` inside
+quotes is data and never triggers it.
 Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
 `"degraded": "unmanaged"`, capped at `heuristic`; `--cmd-done`/`--shell-ready`/`--since-send`/
 `out` refuse with `unmanaged-pane`; `--exit` works and reports `"degraded":

@@ -818,6 +818,73 @@ def timeout_evidence(ctx, condition: Condition) -> dict:
             "conditions": [condition.to_json(False)]}
 
 
+def unquoted(text: str) -> str:
+    """`text` with every quoted region blanked out.
+
+    Shell punctuation inside quotes is data, not syntax: `python3 -c 'import
+    time; time.sleep(1)'` is ONE command, and reading its `;` as a separator
+    would flag a fact-level exit code as partial when it is complete.
+    """
+    out = []
+    quote = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote in "\"`" and i + 1 < len(text):
+                out.append("  ")
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            out.append(" ")
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(" ")
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            break                       # a comment: nothing after it runs
+        elif ch == "\\" and i + 1 < len(text):
+            out.append("\\ ")             # an escaped char is never syntax
+            i += 2
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def line_scope(text: str | None) -> str | None:
+    """What one exit code can honestly claim about this command line.
+
+    `wait --done` answers at `fact` confidence with a single number, and on a
+    compound line that number belongs to part of it. Saying so is the whole
+    point: a strong label quietly covering half a line is the most misleading
+    kind of strong evidence, and both arms of the ab_write round asked for it
+    in their own words. Returns None when the line is a single command.
+    """
+    if not text:
+        return None
+    bare = unquoted(text)
+    # Neutralise the shapes that are not what they look like: `&&`/`||` are one
+    # operator, and `2>&1` is a redirection, not a pipeline or a background job.
+    flat = (bare.replace("&&", "@@").replace("||", "@@")
+                .replace(">&", "@").replace("<&", "@"))
+    notes = []
+    if ";" in bare or "\n" in bare:
+        notes.append("`;`/newline: the code is the LAST command's, so an earlier "
+                     "one can have failed unseen")
+    if "@@" in flat:
+        notes.append("`&&`/`||`: the line short-circuits, so a nonzero code names "
+                     "no stage — read the screen for which part ran")
+    if "|" in flat:
+        notes.append("pipeline: the code is the LAST stage's, unless the shell "
+                     "sets pipefail")
+    if "&" in flat:
+        notes.append("`&`: done means launched, not finished")
+    return "; ".join(notes) or None
+
+
 def in_flight(session: str, since_offset: int) -> bool:
     """A command started after that offset and has not reported completion.
 

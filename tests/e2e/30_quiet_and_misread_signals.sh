@@ -88,6 +88,23 @@ assert 'mid-flight' in h and 'loosen' in h, f'the hint must retract the --until 
 $TD wait -n td30 --socket "$SOCK" --done --expect-code 0 --timeout 25 >/dev/null \
   || fail "--done must reach fact once the silent command finishes"
 
+# --- 1d. a compound line's one exit code must say which part it describes ---
+# `false` then `echo`: the line exits 0, so the number is true and worthless —
+# the only honest thing left is to name what the number covers. The case above
+# (`python3 -c 'import time; …'`, no note) is the other half: a `;` inside
+# quotes is data, and flagging it would make a complete fact look partial.
+$TD send -n td30 --socket "$SOCK" --type 'false; echo TD30_COMPOUND' --key Enter >/dev/null
+$TD wait -n td30 --socket "$SOCK" --done --timeout 15 >"$TMP/compound.json" \
+  || fail "compound line never completed"
+python3 -c "
+import json
+v = json.load(open('$TMP/compound.json'))
+assert v['confidence'] == 'fact' and v['exit_code'] == 0, v
+n = v.get('note') or ''
+assert 'LAST command' in n and 'failed unseen' in n, \
+    f'a semicolon line must be caveated where the number cannot be: {n!r}'
+" || fail "compound-line scope (see above)"
+
 # --- 1c. trace says when the session started, so elapsed maps to wall clock -
 $TD trace -n td30 --socket "$SOCK" 2>/dev/null | head -1 | grep -q 'started=' \
   || fail "trace's header must carry the recording's start time (elapsed alone cannot be attributed to a file write)"
