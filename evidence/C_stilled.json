@@ -1,0 +1,1 @@
+{"verdict": "met", "confidence": "heuristic", "type": "all-of", "met": true, "conditions": [{"type": "quiet", "confidence": "heuristic", "met": true, "ms": 2000}], "evidence": {"screen": "hello\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"}, "context": {"lines": 24, "nonblank_lines": 1, "bytes": 29, "est_tokens": 8, "budget": 2000, "method": "bytes/4", "over_budget": false}}
