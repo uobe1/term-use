@@ -277,7 +277,7 @@ class _Chain:
         return None, None, False
 
 
-def render(grid: list, out_path: str, fmt: str, cols: int | None = None,
+def render(grid: list, out_path: str, cols: int | None = None,
            rows: int | None = None, cursor: tuple[int, int] | None = None,
            font_size: int = FONT_SIZE) -> dict:
     """Draw the grid; returns size/font/glyph accounting.
@@ -380,17 +380,16 @@ def render(grid: list, out_path: str, fmt: str, cols: int | None = None,
                            outline=border, width=1)
 
     palette = False
-    if fmt == "jpg":
-        img.save(out_path, "JPEG", quality=92)
-    else:
-        # A terminal screen uses far fewer than 256 colors, so an exact-count
-        # palette is lossless and roughly 7x smaller for the same pixels.
-        colors = img.getcolors(maxcolors=256)
-        if colors:
-            img = img.quantize(colors=len(colors), method=Image.Quantize.MEDIANCUT,
-                               dither=Image.Dither.NONE)
-            palette = True
-        img.save(out_path, "PNG")
+    # PNG only. A terminal screen uses far fewer than 256 colors, so an
+    # exact-count palette is lossless and roughly 7x smaller than the same
+    # pixels — and JPEG was larger still on the screens we measured, so the
+    # second format bought nothing but a flag to remember.
+    colors = img.getcolors(maxcolors=256)
+    if colors:
+        img = img.quantize(colors=len(colors), method=Image.Quantize.MEDIANCUT,
+                           dither=Image.Dither.NONE)
+        palette = True
+    img.save(out_path, "PNG")
 
     if glyphs["missing"]:
         glyphs["missing_samples"] = [

@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from termuse import __version__
 from termuse import budget as tdbudget
 from termuse import input as tdinput
 from termuse import rcfile, records, replay, screen as tdscreen
@@ -296,6 +297,24 @@ def cmd_fix_tty(args) -> int:
 def cmd_screen(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     if args.meta:
+        # `--meta` is a different question (what is the pane doing) than the
+        # text/grid flags (what is on the screen), and it used to swallow them
+        # silently — an agent that asked for both got half an answer and no
+        # signal that the other half was dropped. Say so instead.
+        asked = [name for name, val in (
+            ("-N", args.keep_trailing), ("--text", args.text), ("-J", args.join),
+            ("--scrollback", args.scrollback), ("--grid", args.grid),
+            ("--runs", args.runs), ("--grep", args.grep), ("--find", args.find),
+            ("--element-at", args.element_at), ("--fg", args.fg),
+            ("--bg", args.bg), ("--attr", args.attr)) if val]
+        if asked:
+            raise TDError(
+                "invalid-arguments",
+                f"--meta answers pane status only; it ignores {', '.join(asked)}",
+                hint="two shapes, two calls: `screen -n NAME --meta` for cursor/"
+                     "blank/stall/native command status, `screen -n NAME "
+                     "[--grid|--runs|--grep|--find TEXT|--element-at X Y]` for "
+                     "what is on the screen")
         state = load_state_or_none(target.session)
         m = tmuxio.meta(target)
         text = tmuxio.capture(target, ("-N", "-e"))
@@ -490,6 +509,21 @@ def cmd_wait(args) -> int:
         raise TDError("invalid-arguments",
                       "--since-send reads the raw stream since the last send "
                       "while --scrollback reads screen history — pick one")
+    # Flags that used to be accepted and then quietly not used: a wait that
+    # never reads the screen cannot be widened by --scrollback, and a probe
+    # whose command is literally `true` cannot be expected to return 5.
+    if args.scrollback and args.until is None:
+        raise TDError("invalid-arguments",
+                      f"--scrollback only widens the --until search; "
+                      f"{'--done' if args.done else 'this condition'} never "
+                      f"reads screen history",
+                      hint="drop --scrollback, or add --until 'regex' "
+                           "--scrollback N for the screen-shape question")
+    if args.expect_code is not None and args.shell_ready:
+        raise TDError("invalid-arguments",
+                      "--shell-ready probes with `true`, which can only answer 0",
+                      hint="to wait for a specific code, use --done "
+                           "--expect-code C after sending the command")
     if args.until is not None:
         scope = "since-send" if args.since_send else "screen"
         if scope == "since-send" and not managed:
@@ -517,6 +551,15 @@ def cmd_wait(args) -> int:
         oracle = waiting.choose_done_oracle(state)
         via = waiting.DONE_VIA[oracle]
         if oracle == "probe":
+            if args.expect_code is not None:
+                raise TDError(
+                    "invalid-arguments",
+                    f"--done fell back to the `true` probe (nothing has been "
+                    f"sent yet), and a probe can only answer 0 — it cannot "
+                    f"report code {args.expect_code}",
+                    hint="send the command first, then --done --expect-code C; "
+                         "waiting for a code from a command you never sent is "
+                         "not a thing a wait can prove")
             inject_probe()
         elif oracle == "osc133":
             conditions.append(waiting.CmdDone(target.session, args.expect_code))
@@ -674,8 +717,8 @@ def cmd_out(args) -> int:
                                 extra={"full_bytes": len(text.encode("utf-8"))})
     redrawn = replay.looks_redrawn(raw)
     if args.json:
-        print(json.dumps({"ok": True, "mode": "linear", "scope": "all" if args.all
-                                                    else "since-send",
+        print(json.dumps({"ok": True, "scope": "all" if args.all
+                         else "since-send",
                           "bytes": ctx["bytes"], "truncated": omitted > 0,
                           "omitted_bytes": omitted, "redrawn": redrawn,
                           "text": shown, "context": ctx}, ensure_ascii=False))
@@ -696,6 +739,13 @@ def cmd_out(args) -> int:
 
 def cmd_replay(args) -> int:
     """The screen at an earlier moment, rebuilt through tmux itself."""
+    if args.o and args.format != "png":
+        raise TDError(
+            "invalid-arguments",
+            f"-o writes a file, and only --format png is a file; "
+            f"--format {args.format} writes to stdout",
+            hint="drop -o to read the text/json on stdout, or ask for "
+                 "--format png -o frame.png")
     if args.format == "png" and os.environ.get("TERM_USE_DISABLE_IMAGE") == "1":
         # Same denial as `screenshot`: the heuristics-only blind-test mode must
         # not have a second door into the image channel.
@@ -730,7 +780,7 @@ def cmd_replay(args) -> int:
         out_path = args.o or default_shot_path(target.session, "png",
                                                load_state_or_none(target.session) is not None)
         try:
-            info = tdscreenshot.render(grid, out_path, "png", cols=cols,
+            info = tdscreenshot.render(grid, out_path, cols=cols,
                                        rows=rows, cursor=cursor)
         except ImportError:
             raise TDError("pillow-missing",
@@ -742,7 +792,6 @@ def cmd_replay(args) -> int:
                   "font (or fix the dir) for the machine's own look", file=sys.stderr)
         ctx = tdbudget.image_context(info["path"], info["size"])
         print(json.dumps({"ok": True, "at": args.at, "format": "png", **info,
-                          "replayed": True,
                           "cursor": list(cursor) if cursor else None,
                           "context": ctx}, ensure_ascii=False))
         tdbudget.warn(ctx, target.session)
@@ -750,7 +799,7 @@ def cmd_replay(args) -> int:
     if args.format == "json":
         ctx = tdbudget.text_context(plain)
         print(json.dumps({"ok": True, "at": args.at, "grid": [cols, rows],
-                          "engine": "pane-replay", "blank": stats["blank"],
+                          "blank": stats["blank"],
                           "cells": stats["painted_cells"], "text": plain,
                           "cursor": list(cursor) if cursor else None,
                           "alternate_on": frame.get("alternate_on"),
@@ -811,8 +860,15 @@ def cmd_screenshot(args) -> int:
                       hint="this session runs heuristics-only; use the text channels")
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
-    out_path = args.o or default_shot_path(target.session, args.format,
+    out_path = args.o or default_shot_path(target.session, "png",
                                            state is not None)
+    if not out_path.lower().endswith((".png", ".PNG")):
+        # With one output format there is still a way to lie: writing PNG bytes
+        # into a name that says .jpg. Refuse rather than ship a mislabeled file.
+        raise TDError("invalid-arguments",
+                      f"screenshot writes PNG only; {out_path!r} promises another "
+                      f"format", hint="choose a .png path, e.g. "
+                                      "screenshot -n NAME -o shot.png")
     # Geometry comes from tmux, not from the capture: a screen that painted
     # nothing has no content bounds, and cropping to nothing used to crash
     # the renderer. -N keeps trailing cells so a painted background survives
@@ -828,7 +884,7 @@ def cmd_screenshot(args) -> int:
         cursor = (pane["cursor_x"], pane["cursor_y"])
     grid = tdscreen.parse_grid(tmuxio.capture(target, ("-N", "-e")))
     try:
-        info = tdscreenshot.render(grid, out_path, args.format, cols=cols,
+        info = tdscreenshot.render(grid, out_path, cols=cols,
                                    rows=rows, cursor=cursor,
                                    font_size=args.font_size)
     except ImportError:
@@ -840,8 +896,7 @@ def cmd_screenshot(args) -> int:
               "face bundled with term-use drew this picture — install a system "
               "font (or fix the dir) for the machine's own look", file=sys.stderr)
     ctx = tdbudget.image_context(info["path"], info["size"])
-    print(json.dumps({"ok": True, "format": args.format, **info,
-                      "context": ctx}, ensure_ascii=False))
+    print(json.dumps({"ok": True, **info, "context": ctx}, ensure_ascii=False))
     tdbudget.warn(ctx, target.session, channel="image")
     return 0
 
@@ -930,6 +985,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="term-use",
         description="Drive and debug interactive terminal programs via tmux (v2).",
     )
+    # `--version` because agents probe it like any other CLI, and without it
+    # argparse answered "the following arguments are required: COMMAND" — a
+    # misleading error for a tool whose whole contract is honest reporting.
+    parser.add_argument("--version", action="version",
+                        version=f"term-use {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     p = sub.add_parser("start", help="create a detached tmux session with v2 recording")
@@ -1034,10 +1094,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
     p.set_defaults(func=cmd_fix_tty)
 
-    p = sub.add_parser("screenshot", help="render the pane to png/jpg (Pillow)")
+    p = sub.add_parser("screenshot", help="render the pane to a png (Pillow)")
     p.add_argument("-n", "--name", required=True, help="session name (or target)")
     p.add_argument("--socket", default=None, help="tmux socket name (-L) override")
-    p.add_argument("--format", choices=["png", "jpg"], default="png")
     p.add_argument("-o", "--out", dest="o", default=None, metavar="PATH",
                    help="output file (default: numbered file beside the "
                         "session's evidence; never overwrites an earlier shot)")

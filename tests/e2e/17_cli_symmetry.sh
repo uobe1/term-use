@@ -47,5 +47,38 @@ n=$(ls "$XDG_STATE_HOME"/term-use/td17/*.png 2>/dev/null | wc -l)
 # --- screen --text: the explicit form of the default mode must be accepted ---
 $TD screen -n td17 --text | grep -q SYM_OK_17 || fail "screen --text rejected"
 
+# --- a flag that cannot apply is refused, not silently dropped -------------
+# Each of these used to be accepted and then never read: the agent got half an
+# answer with no signal that the other half was thrown away, which is the worst
+# kind of silence for a tool whose product is evidence.
+refuses() {   # $1 = what must be refused, rest = the command
+  local what="$1"; shift
+  if "$@" >/dev/null 2>"$TMP/refuse.json"; then
+    fail "$what must not be accepted silently"
+  fi
+  python3 -c "
+import json
+e = json.load(open('$TMP/refuse.json'))['error']
+assert e['code'] == 'invalid-arguments', (e, '$what')
+assert e['hint'], f'$what: a refusal that cannot say what to do instead is noise'
+" || fail "$what (see above)"
+}
+refuses "screen --meta --grid"      $TD screen -n td17 --meta --grid
+refuses "screen --meta -J"          $TD screen -n td17 --meta -J
+refuses "wait --shell-ready --expect-code" \
+        $TD wait -n td17 --shell-ready --expect-code 1 --timeout 3
+refuses "wait --done --scrollback"  $TD wait -n td17 --done --scrollback 50 --timeout 3
+refuses "replay -o with --format text" \
+        $TD replay -n td17 --at last-send --format text -o "$TMP/x.png"
+
+# a probe cannot answer a specific exit code: --done falls back to the `true`
+# probe only when nothing has been sent, so this needs a session of its own
+$TD start -n td17c --cmd bash --socket "$SOCK" >/dev/null || fail "start td17c"
+refuses "--done probe + --expect-code" \
+        $TD wait -n td17c --done --expect-code 5 --timeout 3
+$TD stop -n td17c >/dev/null
+
+# --- --version lives in the unit tests (this file skips without Pillow) -----
+
 $TD stop -n td17 >/dev/null
 echo "E2E-17 PASS"

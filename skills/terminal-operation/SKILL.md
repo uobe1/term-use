@@ -58,6 +58,11 @@ and answers fewer questions about a terminal.
 
 ## Quick reference
 
+**Four commands carry almost every session: `start`, `send`, `wait --done`, `out`** —
+plus `screen` when the question is about the screen and `screenshot` when it is about
+layout. The rest of this table exists for the situations those six cannot answer; do not
+learn it up front, look at it when something fails.
+
 | Command | Purpose |
 |---------|---------|
 | `start -n N --cmd bash --width W --height H` | create a session (+ recording; bash/zsh get OSC 133 injected, fish ≥4 emits it itself) |
@@ -68,7 +73,7 @@ and answers fewer questions about a terminal.
 | `screen -n N [--meta] [-N] [-J] [--grid] [--runs] [--grep --attr A] [--find TEXT] [--element-at X Y]` | text channel; `--find` → 1-based click-ready coords (screen columns, wide glyphs counted correctly). `-J` joins the lines tmux wrapped at the right edge back into one logical line (read a long command or a wrapped table); `-N` keeps the trailing cells tmux would strip, which is what preserves a painted background and column alignment |
 | `out -n N [--all] [--max-bytes K] [--json]` | the pane's own byte stream since your last send, head+tail with the elision marked. It is the *pane*, so it contains your echoed input line and the prompt that follows — a trailing prompt with nothing after it means "the program said nothing", which is a result, not a failure to read |
 | `replay -n N --at 3.5\|offset:N\|last-send [--format text\|json\|png]` | the screen at an earlier moment, rebuilt by feeding raw.log back through tmux |
-| `screenshot -n N [-o p.png] [--format png\|jpg] [--font-size 16] [--no-cursor]` | image channel; `-o` optional (numbered file beside the session's evidence); reports `glyphs.missing` honestly |
+| `screenshot -n N [-o shot.png] [--font-size 16] [--no-cursor]` | image channel, PNG only (`-o` must end in .png); `-o` optional — a numbered file beside the session's evidence that never overwrites an earlier shot; reports `glyphs.missing` honestly |
 | `clear -n N [--history-only]` | reclaim the screen and scrollback before the next capture costs you again |
 | `mouse-detect -n N` / `click -n N X Y` | mouse mode (SGR) / click at 1-based coords |
 | `fix-tty -n N` | restore sane terminal (stty sane) after ECHO damage |

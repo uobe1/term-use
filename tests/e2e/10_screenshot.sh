@@ -27,26 +27,40 @@ printf 'hello screenshot\nline two\n' > "$TMP/hello.txt"
 $TD send -n td10 --type "nano $TMP/hello.txt" --key Enter >/dev/null || fail "send nano failed"
 $TD wait -n td10 --until 'GNU nano' --timeout 10 >/dev/null || fail "nano never opened"
 
-# --- png + jpg renders ---
-$TD screenshot -n td10 --format png -o "$TMP/s.png" >"$TMP/png.json" || fail "png render failed"
-$TD screenshot -n td10 --format jpg -o "$TMP/s.jpg" >"$TMP/jpg.json" || fail "jpg render failed"
-python3 - "$TMP/png.json" "$TMP/jpg.json" <<'PY' || fail "file assertions (see above)"
-import json, sys
+# --- png render (the only format: a palette PNG is lossless and smaller than
+#     JPEG was on terminal screens, so the second format earned no users) ---
+$TD screenshot -n td10 -o "$TMP/s.png" >"$TMP/png.json" || fail "png render failed"
+python3 - "$TMP/png.json" <<'PY' || fail "file assertions (see above)"
+import json, sys, os
 from PIL import Image
-for jf, kind in ((sys.argv[1], "PNG"), (sys.argv[2], "JPEG")):
-    r = json.load(open(jf))
-    import os
-    sz = os.path.getsize(r["path"])
-    assert sz > 5120, f"{kind}: {sz} bytes (want >5KB)"
-    im = Image.open(r["path"])
-    assert im.format == kind, f"{kind}: got {im.format}"
-    assert list(im.size) == r["size"], f"{kind}: file {im.size} vs claimed {r['size']}"
-    W, H = r["grid"]
-    assert r["size"][0] == W * r["charw"] and r["size"][1] == H * r["lineh"], r
+r = json.load(open(sys.argv[1]))
+sz = os.path.getsize(r["path"])
+assert sz > 5120, f"PNG: {sz} bytes (want >5KB)"
+im = Image.open(r["path"])
+assert im.format == "PNG", f"PNG: got {im.format}"
+assert list(im.size) == r["size"], f"file {im.size} vs claimed {r['size']}"
+W, H = r["grid"]
+assert r["size"][0] == W * r["charw"] and r["size"][1] == H * r["lineh"], r
 PY
 
+# a name that promises another format must be refused, not written mislabeled
+if $TD screenshot -n td10 -o "$TMP/lie.jpg" >/dev/null 2>"$TMP/lie.json"; then
+  fail "screenshot -o x.jpg must refuse: it writes PNG only"
+fi
+python3 -c "
+import json
+e = json.load(open('$TMP/lie.json'))['error']
+assert e['code'] == 'invalid-arguments', e
+assert '.png' in (e['hint'] or ''), e
+" || fail "mislabeled output path (see above)"
+
+# --format is gone with the format choice: an unknown flag is an argparse error
+if $TD screenshot -n td10 --format jpg -o "$TMP/x.jpg" >/dev/null 2>&1; then
+  fail "screenshot --format must no longer exist"
+fi
+
 # --- pillow-missing: -S skips site-packages, so PIL is importable nowhere ---
-if python3 -S -m termuse screenshot -n td10 --format png -o "$TMP/s2.png" \
+if python3 -S -m termuse screenshot -n td10 -o "$TMP/s2.png" \
     >/dev/null 2>"$TMP/np.json"; then
   fail "screenshot without Pillow must fail"
 fi

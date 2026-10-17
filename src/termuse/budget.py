@@ -51,10 +51,14 @@ def _cap(est: int, method: str) -> dict:
             "over_budget": b > 0 and est > b}
 
 
-TEXT_METHOD = ("bytes/4 — an estimate, not a meter: box-drawing, CJK and the "
-               "SGR grid JSON cost noticeably more per byte than prose")
-IMAGE_METHOD = ("pixels/750 — the size rule commonly quoted for Anthropic vision "
-                "requests; the provider's own count_tokens is authoritative")
+# Short, machine-shaped labels: `method` rides along with EVERY observation, so
+# a sentence here is paid 30 times a session and read zero times. The caveats
+# ("estimate, not a meter") belong in the docs and in the over-budget warning,
+# which is the one moment an agent is actually deciding what to do about it.
+TEXT_METHOD = "bytes/4"
+IMAGE_METHOD = "pixels/750"
+METHOD_NOTE = ("an estimate, not a meter — box-drawing, CJK and the SGR grid "
+               "JSON cost noticeably more per byte than prose")
 
 
 def text_context(text: str, extra: dict | None = None) -> dict:
@@ -95,8 +99,9 @@ def warn(ctx: dict, target: str, channel: str = "text") -> bool:
     else:
         detail = f"~{est} tokens across {ctx.get('lines', '?')} lines"
     print(f"warning: this {channel} capture costs {detail} (context budget "
-          f"{b}, set TERM_USE_CONTEXT_BUDGET): every later capture re-carries "
-          f"it — reclaim the pane with `term-use clear -n {target}`, or narrow "
-          f"the read (--scrollback N, -J, --grep, or the screenshot channel "
-          f"for layout questions)", file=sys.stderr)
+          f"{b}, set TERM_USE_CONTEXT_BUDGET; the count is {METHOD_NOTE}): every "
+          f"later capture re-carries it — reclaim the pane with "
+          f"`term-use clear -n {target}`, or narrow the read (--scrollback N, "
+          f"-J, --grep, or the screenshot channel for layout questions)",
+          file=sys.stderr)
     return True

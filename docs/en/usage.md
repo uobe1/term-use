@@ -207,6 +207,14 @@ $TD trace -n demo --format json                    # same as NDJSON: [elapsed, c
 (`start`, `wait-met`). `--format json` emits the raw asciicast-v2 arrays for parsing. For
 *what the program said*, `out` is the cheaper channel.
 
+`screen` has two shapes and they do not mix: `--meta` answers pane status (cursor, blank,
+stall signals, the native command status on 3.8+), while the text/grid flags (`--grid`,
+`--runs`, `--grep`, `--find`, `--element-at`, `-N`, `-J`, `--scrollback`) answer what is on
+the screen. Asking for both is refused with `invalid-arguments` rather than silently
+returning one — a flag that was dropped without saying so is the kind of silence this tool
+does not sell. Same rule in `wait`: `--scrollback` widens only the `--until` search, and
+`--expect-code` needs a command that can answer a code (the `true` probe cannot).
+
 `screen --find` returns every literal match with **1-based, click-ready**
 coordinates — the locate-then-click flow is a single hop:
 
