@@ -204,13 +204,27 @@ class _StubFace:
         return ch in self.has
 
 
+class _UnknownFace:
+    """A face whose cmap could not be read: coverage unknown, not a gap."""
+
+    def covers(self, ch):
+        return None
+
+
 def _with_font_dir(tmpdir, coverage):
     """Point the probe at one directory of empty font files and answer coverage
-    from `coverage` instead of parsing them (the ranking is what is under test)."""
+    from `coverage` instead of parsing them (the ranking is what is under test).
+    A `None` value means "unreadable cmap", not "covers nothing"."""
     old_dirs = os.environ.get("TERM_USE_FONT_DIRS")
     real_load = tdscreenshot.ttffont.load
     os.environ["TERM_USE_FONT_DIRS"] = tmpdir
-    tdscreenshot.ttffont.load = lambda p: _StubFace(coverage.get(Path(p).name, ""))
+
+    def load(p):
+        spec = coverage.get(Path(p).name)
+        return _UnknownFace() if spec is None and Path(p).name in coverage \
+            else _StubFace(spec or "")
+
+    tdscreenshot.ttffont.load = load
 
     def restore():
         tdscreenshot.ttffont.load = real_load
@@ -237,6 +251,44 @@ def test_fallback_is_chosen_by_coverage_not_by_filename():
             chosen = tdscreenshot.fallback_fonts(
                 os.path.join(tmp, "DejaVuSansMono.ttf"), {"你", "好"})
             assert [os.path.basename(c) for c in chosen] == ["wqy-zenhei.ttc"], chosen
+        finally:
+            restore()
+
+
+def test_unknown_coverage_is_kept_after_a_proven_one():
+    """An unreadable cmap is unknown, not empty: the face may be the only CJK
+    face on the machine. It must stay in the chain, but behind a face that can
+    actually prove it covers the missing codepoints."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in ("known-cjk.ttf", "unknown-cjk.ttf", "DejaVuSansMono.ttf"):
+            (Path(tmp) / n).write_bytes(b"")
+        restore = _with_font_dir(tmp, {"known-cjk.ttf": "你",
+                                       "unknown-cjk.ttf": None})
+        try:
+            chosen = [os.path.basename(c) for c in tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), {"你", "好"})]
+            assert chosen == ["known-cjk.ttf", "unknown-cjk.ttf"], chosen
+            # The known face covers everything the screen needs: the unproven
+            # face has nothing left to contribute and must not be opened.
+            chosen = [os.path.basename(c) for c in tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), {"你"})]
+            assert chosen == ["known-cjk.ttf"], chosen
+        finally:
+            restore()
+
+
+def test_only_unknown_coverage_still_yields_a_chain():
+    """The measured CJK failure: every candidate's cmap was unreadable, so the
+    old ranking dropped them all and returned an empty chain. Unknown coverage
+    is the reason to try the font, not the reason to discard it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in ("unknown-cjk.ttf", "DejaVuSansMono.ttf"):
+            (Path(tmp) / n).write_bytes(b"")
+        restore = _with_font_dir(tmp, {"unknown-cjk.ttf": None})
+        try:
+            chosen = [os.path.basename(c) for c in tdscreenshot.fallback_fonts(
+                os.path.join(tmp, "DejaVuSansMono.ttf"), {"你"})]
+            assert chosen == ["unknown-cjk.ttf"], chosen
         finally:
             restore()
 

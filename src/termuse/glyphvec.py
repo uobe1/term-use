@@ -1,14 +1,13 @@
 """Symbol ranges drawn as geometry, not glyphs.
 
 Modern terminal UIs paint most of their chrome out of a handful of Unicode ranges
-that a *single installed font* will not reliably cover — measured on this box,
-DejaVu Sans Mono has box drawing and blocks but **no braille and no Powerline
-PUA**, and nothing on a typical server has the PUA at all; on the device that
-reported issue #3, Droid Sans Mono had no arrows either. The reference
-implementations (asciinema's `agg`, kitty, foot) solve the same problem the same
-way: they vectorize these ranges instead of hoping for a font. Same here, so a
-starship prompt segment, a braille spinner, a `←` in a menu or a bordered panel
-renders on a machine with no symbols font installed.
+that a *single installed font* will not reliably cover: a UI mono may have box
+drawing and blocks but no braille, no Powerline PUA, or no arrows, and a machine
+with no symbols font has none of the PUA at all. The reference implementations
+(asciinema's `agg`, kitty, foot) solve the same problem the same way: they
+vectorize these ranges instead of hoping for a font. Same here, so a starship
+prompt segment, a braille spinner, a `←` in a menu or a bordered panel renders on
+a machine with no symbols font installed.
 
 Each `draw_*` returns True when it painted the cell; the renderer falls back to
 the font chain when it returns False.

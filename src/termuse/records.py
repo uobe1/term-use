@@ -168,18 +168,28 @@ def output_age_s(session: str) -> float | None:
 # raw.log stores the stream as JSON strings, and JSON escapes control characters
 # even with ensure_ascii=False — so on disk the marker reads `\u001b]133;A`, not
 # the raw byte. Match both spellings rather than betting on which one appears.
-_MARKERS = tuple(
+# A prompt marker (A/B) proves the shell runs its own prompt cycle. A bare 133
+# C/D may be term-use's own sentinel, so it is not proof of shell integration;
+# any 633 marker is another tool's integration (our sentinel only writes 133).
+_PROMPT_MARKERS = tuple(
     f"{esc}]{code};{letter}".encode()
-    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "ABCD")
+    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "AB")
+_633_MARKERS = tuple(
+    f"{esc}]{code};".encode()
+    for esc in ("\\u001b", "\x1b") for code in ("633",))
 
 
 def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
-    """Has this pane actually emitted command markers? Evidence, not assumption.
+    """Has this pane's shell run its own prompt cycle? Evidence, not assumption.
 
     `start` can only know what it injected itself; fish >= 4.0 emits OSC 133
     natively and a user's zsh/bash may carry VSCode's (633) or WezTerm's (133)
     integration. Refusing those sessions was a portability hole — the strongest
     evidence the tool offers was gated on a guess made at launch time.
+
+    Proof is a prompt marker (A/B) or another tool's 633 stream. A bare 133 C/D
+    can be term-use's own sentinel, which says the shell can be narrated, not
+    that it reports for itself.
     """
     path = session_dir(session) / "raw.log"
     deadline = time.monotonic() + wait_s
@@ -191,7 +201,8 @@ def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
         with path.open("rb") as fh:
             fh.seek(max(0, size - 65536))
             chunk = fh.read()
-        if any(m in chunk for m in _MARKERS):
+        if any(m in chunk for m in _PROMPT_MARKERS) \
+                or any(m in chunk for m in _633_MARKERS):
             return True
         if time.monotonic() >= deadline:
             return False

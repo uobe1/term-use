@@ -23,8 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from termuse import records
 from termuse.errors import TDError
-from termuse.waiting import CmdDone, echo_barrier
+from termuse.waiting import CmdDone, echo_barrier, in_flight
 
 C = "\x1b]133;C\x07"
 D0 = "\x1b]133;D;0\x07"
@@ -258,11 +259,96 @@ def test_expect_code_mismatch_fails_immediately_on_either_channel():
             shutil.rmtree(root, ignore_errors=True)
 
 
+def test_native_running_keeps_in_flight_honest_when_the_recorder_is_blind():
+    """A timeout on tmux 3.8 must not say `in_flight: false` just because
+    pipe-pane saw nothing: tmux knows an OSC 133 command is still running."""
+    root = build("cd12", [inject("sleep 12")], pre=0, settled=True)
+    try:
+        meta = {"pane_command_running": 1, "pane_command_status": None,
+                "pane_command_start_time": 100, "pane_command_end_time": None}
+        assert in_flight("cd12", 0, meta) is True
+        meta["pane_command_running"] = 0
+        assert in_flight("cd12", 0, meta) is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_markers_and_echo_in_one_lagged_event_are_ordered_by_offset():
+    """A frozen recorder can deliver the previous command's C/D and our echo as
+    one o-event. Their file position is identical; only the in-event offset shows
+    that the D sits before the echo and cannot be ours."""
+    lagged = C + D0 + "$ sleep 12\r\n"
+    root = build("cd17", [inject("sleep 12"), ("o", lagged)],
+                 pre=0, settled=True)
+    try:
+        cond = CmdDone("cd17")
+        assert cond.evaluate(Ctx()) is False, \
+            "a D before the echo inside one event is the previous command's"
+        assert cond.degraded == "unattributed-marker", cond.degraded
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_send_without_its_own_marker_never_borrows_a_previous_one():
+    """The device shape: `send sleep 12` answers `paused` (no marker), but the
+    previous line's sentinel D arrives after the sleep echo. No marker for this
+    send means no fact — the D belongs to the earlier command."""
+    for marker in ("paused", "skipped", "none"):
+        root = build("cd16", [inject("sleep 12"), ("o", C), ("o", D0)],
+                     pre=0, settled=True, marker=marker)
+        try:
+            cond = CmdDone("cd16")
+            assert cond.evaluate(Ctx()) is False, marker
+            assert cond.degraded == "no-marker", cond.degraded
+            assert cond.exit_code is None, marker
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_outstanding_sentinel_is_in_flight_when_both_readers_are_blind():
+    """A clobbered shell emits no C at preexec, so native and the byte scan are
+    blind while the command runs. Our own sentinel has not reported its D yet —
+    that is the proof the work is still out."""
+    root = build("cd15", [("o", C), ("o", D0)], pre=0, settled=True)
+    try:
+        st = records.read_state("cd15")
+        size = (records.session_dir("cd15") / "raw.log").stat().st_size
+        st["marker_source"] = "sentinel"
+        st["last_tracked_offset"] = size
+        assert in_flight("cd15", 0, None, st) is True
+        st["marker_source"] = "paused"
+        assert in_flight("cd15", 0, None, st) is True
+        st["last_tracked_offset"] = 0       # the recorded D answers it
+        assert in_flight("cd15", 0, None, st) is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_633_e_is_not_a_completion():
+    """VSCode's 633;E carries the command line, not the exit status. Counting it
+    as done made a running command read as finished in timeout evidence."""
+    root = build("cd13", [("o", C), ("o", "\x1b]633;E;echo hi\x07")],
+                 pre=0, settled=True)
+    try:
+        assert in_flight("cd13", 0, None) is True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_d_marker_ends_in_flight():
+    root = build("cd14", [("o", C), ("o", "out"), ("o", D0)],
+                 pre=0, settled=True)
+    try:
+        assert in_flight("cd14", 0, None) is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_a_hard_wrapped_echo_still_anchors_the_barrier():
-    # Measured on the device: a wrapper's readline breaks the echoed line where
-    # the cursor happens to sit — inside a token — so a match that tolerates only
-    # collapsed whitespace misses our own echo, falls back to "the file was
-    # quiet", and reports the borrowed pair as a fact.
+    # A wrapper's readline can break the echoed line where the cursor happens to
+    # sit — inside a token — so a match that tolerates only collapsed whitespace
+    # misses our own echo, falls back to "the file was quiet", and reports the
+    # borrowed pair as a fact.
     line = "printf '" + "a" * 32 + "'"
     nl, cr = chr(10), chr(13)
     wrapped = ("$ " + line[:15] + nl + line[15:26] + nl + line[26:] + cr + nl)

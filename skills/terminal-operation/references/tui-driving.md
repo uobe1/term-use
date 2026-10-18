@@ -13,6 +13,12 @@ in a wait-loop.**
 | REPL (prompt + eval) | anchor on the prompt, verify results with `out`/`screen -J` | `--shell-ready` after the quit key |
 | Full-screen TUI (alt-screen, repaints) | anchors must be derived from observation | after it exits, the alt-screen restores: stale frames can fake-settle a short quiet and re-match old anchors, so re-verify the screen after any program swap and anchor the *new* program's first paint |
 
+While an interactive program holds the tty, `send` answers `marker: paused`: the line
+goes through verbatim and no completion marker is appended. That is protection, not a
+failure — keep driving the program with its own prompts and output anchors. After it
+exits, `--shell-ready` proves the shell is back; `--done` on the line that launched the
+program answers when the shell runs the queued marker, not while the program is running.
+
 ## 2. Observe, then derive the anchor
 
 Launch, then catch the first paint before you have any anchor: `wait --quiet-ms 700`
@@ -57,7 +63,7 @@ honest as long as you say what you read it from.
 - **Live monitors (top/htop style)**: repaint on a timer; one frame can be mid-repaint and
   short-lived processes vanish between refreshes. Read two frames ~2s apart and answer only
   if they agree; answer from the program's own sorted rows, not the aggregate header
-  (measured: `800%cpu 800%idle` while the per-process rows were still usable).
+  (the header can disagree with rows that are still usable).
 - **REPL block input**: any colon-opening statement enters the continuation prompt (`...`)
   and the block needs ONE extra empty Enter to close, otherwise your next line is
   swallowed. Prefer colon-free one-liners; for real blocks send each line separately and

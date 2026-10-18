@@ -71,6 +71,17 @@ def test_a_shell_that_reports_for_itself_is_left_alone():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_non_sentinel_shell_with_its_own_markers_is_left_alone():
+    """fish >= 4 cannot carry our suffix, but its stream carries A/B before the
+    first command completes. That is its own channel, not "no marker"."""
+    root = build("s8", [PROMPT, CMDLINE], cmd="fish")
+    try:
+        assert records.shell_markers_proven("s8") is False  # no D yet
+        assert plan("s8") == ("shell", None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_our_own_sentinel_never_certifies_a_dead_shell():
     """The trap this rule exists to avoid: the sentinel writes C and D, so counting
     any `D` as proof would report the shell as integrated after the first line we
@@ -115,9 +126,54 @@ def test_unsafe_lines_are_refused_with_a_reason():
         assert waiting.sentinel_refusal(text) is None, text
 
 
+def test_the_shells_own_parser_is_the_general_completeness_check():
+    """The shape list can never name every construct; the shell can. The parser
+    is asked about the exact line we would type, suffix included."""
+    incomplete = ("while true", "if true", "case x in", "function f()",
+                  "for x in a b", "select x in a b")
+    for line in incomplete:
+        reason = waiting.parser_refusal(line + waiting.sentinel_for(line), "bash")
+        assert reason, line
+    complete = ("true", "echo hi", "if true; then echo x; fi", "cd /tmp;",
+                "make && make install", "for i in 1 2; do echo $i; done")
+    for line in complete:
+        assert waiting.parser_refusal(
+            line + waiting.sentinel_for(line), "bash") is None, line
+    # `!` is syntactically a complete line to bash, so the shape guard refuses
+    # it before the parser: the suffix would read the reserved word's status.
+    assert waiting.sentinel_refusal("!")
+
+
+def test_parser_check_never_executes_the_candidate():
+    """`-n` reads, it does not run: a substitution in the caller's line must not
+    be executed by the completeness check."""
+    marker = Path(tempfile.mkdtemp(prefix="tu-parser-")) / "ran"
+    try:
+        line = f"echo $(touch {marker})"
+        assert waiting.parser_refusal(
+            line + waiting.sentinel_for(line), "bash") is None
+        assert not marker.exists(), "the parser executed a command substitution"
+    finally:
+        shutil.rmtree(marker.parent, ignore_errors=True)
+
+
+def test_a_shell_with_no_parser_check_is_refused_not_guessed():
+    assert waiting.parser_refusal("true" + waiting.SENTINEL, "csh")
+
+
+def test_marker_plan_uses_the_parser_for_open_constructs():
+    root = build("s7", ["Welcome\n"])
+    try:
+        mode, reason = plan("s7", "while true")
+        assert mode == "skipped" and "parser" in reason, (mode, reason)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_only_shells_that_speak_dollar_question_are_offered():
     for cmd, ok in (("bash", True), ("sh", True), ("dash", True), ("zsh", True),
-                    ("env ZDOTDIR=/x zsh", True), ("/bin/ksh", True),
+                    ("env ZDOTDIR=/x zsh", True), ("env -i zsh", True),
+                    ("/bin/ksh", True),
                     ("fish", False), ("csh", False), ("tcsh", False),
                     ("python3", False), (None, False)):
         assert waiting.sentinel_possible({"cmd": cmd}) is ok, cmd
@@ -168,9 +224,27 @@ def test_a_tracked_line_that_never_answered_pauses_the_narration():
         st["last_tracked_offset"] = size
         _rewrite_state("s6", st)
         assert waiting.tracked_line_answered("s6", st) is False, "nothing since"
-        st["marker_source"] = "shell"
+        # A paused send is not a new tracked line: it must not overwrite the
+        # outstanding proof, or the next line would get a sentinel appended
+        # into the program that still holds the tty.
+        for overwrite in ("shell", "paused", "none", "skipped"):
+            st["marker_source"] = overwrite
+            _rewrite_state("s6", st)
+            assert waiting.tracked_line_answered("s6", st) is False, overwrite
+        st["marker_source"] = "paused"
+        st["last_tracked_offset"] = 0
         _rewrite_state("s6", st)
-        assert waiting.tracked_line_answered("s6", st) is True, "nothing to prove"
+        assert waiting.tracked_line_answered("s6", st) is True, \
+            "the recorded D answers the outstanding tracked line"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_unrecognized_shell_names_itself_in_the_skip_reason():
+    root = build("s9", ["Welcome\n"], cmd="myshell --rcfile /tmp/rc -i")
+    try:
+        mode, reason = plan("s9", "true")
+        assert mode == "skipped" and "myshell" in reason, (mode, reason)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

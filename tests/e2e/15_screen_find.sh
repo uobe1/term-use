@@ -10,6 +10,8 @@ TD="python3 -m termuse"
 NAME="td15_$$_$RANDOM"
 SOCK="td15sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }

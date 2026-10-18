@@ -31,7 +31,7 @@ Format `vX.Y[.Z]aN` / `vX.Y[.Z]bN` / `vX.Y[.Z]`, where `X` is the major version 
 
 `N` counts iterations within that line and resets when `X.Y` advances
 (`2.0.0a9` → `2.1.0a1`). `pyproject.toml` carries the same number without the `v`
-(`2.0.0a6`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
+(`2.0.0a7`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
 
 **Three lines, three branches** — alpha, beta, and formal advance independently; they
 are *not* force-synced. Routing:
@@ -91,16 +91,19 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
 - **A completion is authorized, not merely positioned**: `send` reads its offset from
   the recording's current size while the recorder lags the pane, so the *previous*
   command's `C` and `D` can both land after it. Position is necessary and not
-  sufficient: `CmdDone` also requires a barrier the *same send* caused — either
-  `send` measured the recorder drained (`last_send_settled`, so nothing was lagging),
-  or the echo of the text it injected sits between the offset and the authorizing `C`
-  (tmux serializes a pane's stream, so the previous command's bytes are ordered
-  before our echo no matter when the recorder delivered them). Neither is provable →
-  the marker is reported `degraded: unattributed-marker`, never as a fact. On tmux
-  3.8+ the native answer is checked against `pane_command_start_time > baseline`
-  first, because `running` flips 1→0 with the *old* start time when a busy shell
-  finishes. Position alone is not ownership — a met `fact` for the command before
-  yours is the worst thing this tool can do.
+  sufficient. The send-side rule is that a new marker-bearing line is only narrated
+  when the previous marker-bearing send has reported its `D`; otherwise the line is
+  `paused` and `--done`/`--cmd-done` refuse it, because an earlier command's marker
+  arriving after the new echo cannot be told apart from the new one (a command that
+  starts late can put its `C` after our echo). For a marker the shell itself emitted,
+  `CmdDone` also requires a wait-side barrier the *same send* caused — `send`
+  measured the recorder drained (`last_send_settled`), or the echo of the injected
+  text sits between the offset and the authorizing `C`. Neither is provable → the
+  marker is reported `degraded: unattributed-marker`, never as a fact. On tmux 3.8+
+  the native answer is checked against `pane_command_start_time > baseline` first,
+  because `running` flips 1→0 with the *old* start time when a busy shell finishes.
+  Position alone is not ownership — a met `fact` for the command before yours is the
+  worst thing this tool can do.
 - **A synthesized fact must name its author.** When the pane's shell emits no OSC 133 at
   all — an rc file that hands bash to a prompt wrapper (blerust and friends) clears
   `PS1`/`PROMPT_COMMAND` and reads lines itself, so no injection can survive it — `send`
@@ -110,11 +113,14 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   never lengthened); a line whose meaning the suffix could change is refused with a reason
   (`skipped` — background `&`, dangling pipe, open `then`/`do`, heredoc, comment,
   unbalanced quote, or a shell that does not speak `$?`); tracking **pauses** while a
-  program holds the tty — the last tracked line not reporting back is the proof that the
-  shell never consumed it, so the next line is that program's input and appending shell
-  syntax there is corruption; and the verdict says in its `note` that the marker was
-  synthesized and covers the line's last stage only. The reply carries
-  `marker: shell|sentinel|paused|skipped` with a reason, so nothing has to be guessed.
+  program holds the tty or the previous marker-bearing command is still in flight —
+  the last tracked line not reporting back is the proof that the shell never consumed
+  it, so the next line is that program's input or a line whose marker could not be
+  attributed, and appending shell syntax there is corruption; a send with no marker of
+  its own is refused by `--done`/`--cmd-done`, never answered by an earlier marker; and
+  the verdict says in its `note` that the marker was synthesized and covers the line's
+  last stage only. The reply carries `marker: shell|sentinel|paused|skipped` with a
+  reason, so nothing has to be guessed.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility
@@ -131,7 +137,7 @@ gate the machine under test never passes — run the suite against a 3.8 server.
 
 | server | holds |
 |---|---|
-| with command tracking | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`. term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
+| with command tracking | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_last_output_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`. term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `--done` chooses it as an oracle when the baseline carries evidence, the integration gate accepts it, timeout `in_flight` ORs it, `screen --meta` exposes it (and takes `last_output_age_s` from `pane_last_output_time` when present), and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
 | without it | the `pane_command_*` formats expand to empty, so `tmuxio.meta()` drops the whole group. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
 
 The shape of that channel decides how it is used: `running`
@@ -174,14 +180,13 @@ arrow debounce, `$?` expanded before tmux sees it, kitty key encodings, …). If
 a real-world pitfall, update the skill in the same PR so agents benefit immediately.
 
 The skill is **two-layer and priced per token**: the core `SKILL.md` is what every
-session loads, so it stays short (193 lines / 14 KB today, against the 353-line / 26.7 KB
-a5 core that every arm paid) and carries only what an agent needs before acting;
+session loads, so it stays short and carries only what an agent needs before acting;
 `references/*.md` are loaded at the moment the core names them. A line earns a place in
-the core only when an arm of the A/B round had to guess or derive it — the ab8 arms
-loaded no reference at all on a plain-CLI task and still rated `doc` 2–3, which is the
-evidence that the split works and that the core should stay this size rather than grow.
+the core only when a blind arm had to guess or derive it; arms on plain-CLI tasks load
+no reference, which is the evidence that the split works and the core should stay small.
 New detail goes into a reference unless it changes a decision; rationale and
-measurements go into the repo docs, not the skill body. Do not state a rule twice.
+measurements go into the gitignored working notes, not the skill body. Do not state a
+rule twice.
 
 Is a skill revision actually better? `tests/blind/ab_skill.sh` answers that with agents
 rather than opinion — objective verdict from the fixture's end state, weighted confusion
@@ -202,9 +207,12 @@ Four rules that came out of running it, not from designing it:
   every arm's opening context and it names the fixture and its traps. Restore it
   afterwards.
 - **The `writes` fixture's verdict axis has no resolving power.** Four consecutive arms
-  reached BOTH_OK with zero re-sends. It catches a careless arm (an a5 arm re-ran the
+  reached BOTH_OK with zero re-sends. It catches a careless arm (one re-ran the
   non-idempotent step and got caught), and it cannot prove a careful one — so cost and
   confusion are the axes with signal, and `verdict` is a guard rail.
+- **`general` measures the channel refusals.** Its four end-state files are the proxy
+  for the habit: a survey under a paused marker, a background line with no marker, and
+  a shell term-use cannot narrate. Read its verdict beside `confusion`, not alone.
 
 ## Commit messages
 

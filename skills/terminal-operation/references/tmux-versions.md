@@ -18,6 +18,7 @@ tmux parses OSC 133 itself and keeps per-pane state:
 | `pane_command_start_time` / `pane_command_end_time` | 1-second granularity timestamps |
 | `pane_command_duration` | seconds the last command took |
 | `pane_last_prompt_time` | when a prompt (`A` marker) last arrived |
+| `pane_last_output_time` | when the pane last produced output |
 | `pane_output_generation` | monotonic output counter |
 
 `wait --done`/`--cmd-done` consult this **before** replaying the recording, and the verdict
@@ -27,6 +28,29 @@ recording cannot: a `pipe-pane` that stopped, a prompt framework that took `PROM
 back, and markers forwarded from the far side of ssh. Where the server has no command
 tracking, `via: osc133` is *all this build can do* — it does not mean the oracle was chosen
 over an alternative.
+
+On a server that has it, the native channel is treated as an oracle, not as a hint:
+
+- `wait --done` chooses `tmux-command-status` when the baseline carries a status, a
+  running command, a prompt time, or this send's own sentinel; `via` then names the
+  native channel even when `state.shell_integration` is false.
+- `--cmd-done`/`--shell-ready` accept the group as proof that a fact channel exists even
+  when `raw.log` carries no markers (a detached recorder, or markers that only reached
+  tmux). They no longer refuse with `no-shell-integration` on such a pane.
+- A timeout's `in_flight` ORs `pane_command_running`, so a blind recording cannot make a
+  running command look finished. `E` is not a completion — VSCode's `633;E` carries the
+  command line; only `D` ends a command.
+- The send-side attribution check accepts native start/end times as proof that the
+  previous *shell-marker* command finished when the recorder is blind; otherwise every
+  later line would be `paused` after a detached pipe. A sentinel marker is not proved
+  this way: tmux sees its `C`/`D` only after the command, and the code cannot be tied
+  to the line that emitted it; its `D` must reach the recording.
+- `screen --meta` uses `pane_last_output_time` for `last_output_age_s` when present, and
+  says `last_output_age_source: tmux`; a stopped recorder therefore does not make a
+  live pane look silent.
+- `--quiet-ms` can still settle when the recorder never wrote an o-event: on 3.8 the
+  screen-stability gate answers and the verdict carries `degraded: recorder-blind`
+  instead of pretending the raw-stream gate ran.
 
 ### Limits, stated because they change what you can claim
 

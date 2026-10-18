@@ -87,10 +87,10 @@ $TD screen -n td18 2>/dev/null | grep -q 'again 200' \
   || fail "--history-only must leave the visible screen alone"
 
 # --- a --history-only that reclaims nothing must say so ----------------------
-# An ab8 arm ran this on a short pane, got `rows_before: 17, rows_after: 17,
-# history_size: 0` and read those counts as work done. A no-op has to be
-# distinguishable from a success, because the whole point of the command is the
-# cost of the NEXT capture.
+# A short pane has no scrollback: `--history-only` can answer
+# `rows_before == rows_after` and `history_size: 0`, and those counts must not
+# read as work done. A no-op has to be distinguishable from a success, because
+# the whole point of the command is the cost of the NEXT capture.
 $TD stop -n td18 --socket "$SOCK" >/dev/null || fail "stop failed"
 $TD start -n td18b --cmd bash --socket "$SOCK" --width 80 --height 24 >/dev/null
 $TD wait -n td18b --shell-ready --socket "$SOCK" --timeout 15 >/dev/null

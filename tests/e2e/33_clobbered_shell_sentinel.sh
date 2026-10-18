@@ -26,11 +26,22 @@ TD="python3 -m termuse"
 NAME="td33_$$_$RANDOM"
 SOCK="td33sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 fail() { echo "E2E-33 FAIL: $*"; exit 1; }
+
+# A shell whose integration is guaranteed, for the half of this test that must
+# prove a working shell is left alone: a user's themed rc would otherwise make
+# "integrated" depend on the machine under test.
+cat > "$TMP/clean.bashrc" <<'RC'
+PS1='\[\e]133;B\a\]tu-clean$ '
+PS0='\[\e]133;C\a\]'
+PROMPT_COMMAND='__tu_ec=$?; printf "\e]133;D;%s\a\e]133;A\a" "$__tu_ec"'
+RC
 
 # --- 1. the clobbered shell --------------------------------------------------
 $TD start -n "$NAME" --cmd "bash --rcfile $ROOT/tests/fixtures/clobbering.bashrc -i" \
@@ -60,7 +71,10 @@ assert "__tu_ec" not in note, \
     f"the note must name the caller's stage, not our own suffix: {note}"
 st = json.load(open(__import__("sys").argv[2]))
 assert st.get("marker_source") == "sentinel", st
-assert st.get("shell_integration") is True, st  # the stream proved it, not the launch guess
+# The sentinel is not the shell's own integration: a bare 133 C/D written by
+# term-use must not certify the shell as reporting for itself.
+assert st.get("shell_integration") is False, st
+assert st.get("last_marker_source") == "sentinel", st
 PY
 
 # The command still ran as typed — a sentinel that corrupts the line is worse
@@ -76,6 +90,7 @@ r = json.load(sys.stdin)
 assert r['marker'] == 'skipped', r
 assert 'background' in (r.get('marker_reason') or ''), r
 assert r['sent']['text'] == 'sleep 1 &', f'the line must stay exactly as typed: {r}'
+assert '--until' in (r.get('marker_hint') or ''), f'the skip must name the next move: {r}'
 " || fail "a line the sentinel cannot follow was not refused cleanly (see above)"
 set +e
 BG="$($TD wait -n "$NAME" --done --timeout 3 2>&1)"
@@ -84,7 +99,8 @@ set -e
 [ "$RC" != 0 ] || { echo "---- $BG"; fail "--done answered for a background job it could not observe"; }
 
 # --- 3. a working integration is left alone ---------------------------------
-$TD start -n td33ok --cmd bash --socket "$SOCK" --width 90 --height 25 >/dev/null \
+$TD start -n td33ok --cmd "bash --rcfile $TMP/clean.bashrc -i" \
+  --socket "$SOCK" --width 90 --height 25 >/dev/null \
   || fail "start (integrated) failed"
 # Warm it up first: one prompt cycle must have run, so "the shell emits markers"
 # is a reading of the stream and not a race with bash's startup.
@@ -154,10 +170,26 @@ r = json.load(sys.stdin)
 assert r['marker'] == 'paused', r
 assert r['sent']['text'] == 'echo TU_INTO_CAT', f'our suffix reached a program: {r}'
 assert 'never reported back' in (r.get('marker_reason') or ''), r
+assert 'foreground' in (r.get('marker_reason') or ''), f'the paused reason must name what holds the tty: {r}'
+assert '--until' in (r.get('marker_hint') or ''), r
 " || fail "tracking did not pause for the program holding the tty (see above)"
+# A paused send must not erase the outstanding proof: a second line into the
+# same program is still the program's input, never shell syntax.
+OUT2="$($TD send -n "$NAME" --type 'echo TU_INTO_CAT_2' --key Enter)" \
+  || fail "send (second line into cat)"
+printf '%s\n' "$OUT2" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+assert r['marker'] == 'paused', r
+assert r['sent']['text'] == 'echo TU_INTO_CAT_2', f'our suffix reached a program: {r}'
+assert '__tu_ec' not in r['sent']['text'], r
+" || fail "a paused send lost the outstanding marker (see above)"
 $TD send -n "$NAME" --key C-d >/dev/null || fail "send (C-d)"
-$TD wait -n "$NAME" --done --timeout 15 >/dev/null \
-  || fail "the queued cat line never reported back once the program exited"
+# C-d is not a submitted line, so the last marker-bearing send is still the
+# paused one. Wait for the prompt itself; the shell's outstanding sentinel D
+# lands before it and lets the next send narrate again.
+$TD wait -n "$NAME" --until 'tu-clobber[$]' --since-send --timeout 15 >/dev/null \
+  || fail "the shell never returned after the program exited"
 $TD send -n "$NAME" --type "echo TU_AFTER" --key Enter >"$TMP/resume.json" \
   || fail "send (after cat)"
 python3 -c "

@@ -25,12 +25,15 @@ A tmux client running *inside* a term-use pane is drivable directly, with three 
 
 ## Shell-protocol waits through a nested or remote terminal
 
-When the pane's foreground is a terminal passthrough (`ssh`, `mosh`, `telnet`, nested
-`tmux`, `dtach`, `abduco`), the *local* shell is blocked inside it and its markers are the
-only ones term-use's recording can see — the remote's arrive as ordinary bytes. That shape
-raises `shell-protocol-unavailable` rather than timing out, and the advice is to change
+When the foreground process is not the shell `start` launched, the local shell is
+blocked inside it and its markers cannot answer for what you type into that program.
+`ssh`/`mosh`/`telnet`, a nested `tmux`/`screen`/`dtach`/`abduco`, container exec,
+`sudo -s`/`su` and a language REPL are examples of the same shape, not the list: what
+matters is that the tty now belongs to another program. The remote/REPL output arrives
+as ordinary bytes to term-use's recording. This shape raises
+`shell-protocol-unavailable` rather than timing out, and the advice is to change
 channel (`--until 'regex' --since-send`, or print your own sentinel like
-`printf 'DONE%s\n' "$?"`).
+`printf 'DONE%s\n' "$?"`, in that program's own language).
 
 It does **not** mean "send the program's quit key": the shell behind ssh may be idle and
 healthy, and a stray interrupt is how a working session gets wrecked. On tmux 3.8+ the

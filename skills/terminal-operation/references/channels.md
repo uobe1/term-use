@@ -14,7 +14,7 @@ is literally `default` (`-n default:inner:0.0`).
 
 | Command | Notes |
 |---|---|
-| `start -n N --cmd bash --width W --height H` | creates the session and its recording. bash/zsh get OSC 133 hooks injected; fish ≥4 emits them itself; plain `sh`/`dash` cannot (no pre-exec hook). The target is gated until the recorder is attached, so a program's first bytes are never lost. |
+| `start -n N --cmd bash --width W --height H` | creates the session and its recording. bash/zsh get OSC 133 hooks injected; fish ≥4 emits them itself; plain `sh`/`dash` have no pre-exec hook but `send` can narrate them with its sentinel; an unrecognized command name gets neither. The target is gated until the recorder is attached, so a program's first bytes are never lost. The result carries `marker: shell|sentinel|unknown` — which channel it expects; `unknown` means the first send or `--shell-ready` will tell. |
 | `stop -n N` | kills the session. Stopping the last one kills the tmux server, taking nested sessions with it. |
 | `sessions [--socket NAME]` | `[{name, windows, attached}]`. A socket with no server yet answers `[]` with a note on stderr — that is an empty room, not a fault. |
 | `resize -n N --width W --height H` | reflows the pane. Recorded as an `r` event, because `replay` has to reproduce it to rebuild any frame after it. |
@@ -50,16 +50,24 @@ is literally `default` (`-n default:inner:0.0`).
     powerlevel/starship setups), so term-use appended its own
     `; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007' "$__tu_ec"`. The line on
     screen is longer than what you wrote, and `sent.text` shows the whole of it — read
-    it back before reasoning about what ran.
-  - `paused` + `marker_reason` — the last tracked line never reported back, so a
-    program (a REPL, `ssh`, a password prompt) holds the tty and would otherwise be
-    fed our shell syntax as input. The line goes through verbatim and tracking resumes
-    by itself once the outstanding marker arrives — usually when the program exits.
-  - `skipped` + `marker_reason` — the suffix would have changed what runs (a background
-    `&`, a dangling pipe or operator, an open `then`/`do`, a heredoc, a trailing comment,
-    an unbalanced quote) or the shell does not speak `$?` (fish, csh). That line has no
-    fact channel: anchor a `--until 'regex' --since-send`, or print a sentinel yourself
-    where the command's own text allows it.
+    it back before reasoning about what ran. The printf is the line's last stage, so
+    a later command's `$?` is 0; read the code from the verdict, not from `$?`.
+  - `paused` + `marker_reason` — the last marker-bearing line has not reported back:
+    either a program (a REPL, `ssh`, a password prompt) holds the tty, or the previous
+    command is still in flight. The new line goes through verbatim and is not
+    narrated; appending shell syntax here would corrupt a program's input or make the
+    marker unattributable. Tracking resumes once the outstanding marker arrives, and
+    `--done`/`--cmd-done` refuse this send (it has no marker to answer). The result's
+    `marker_hint` names the channel to use instead.
+  - `skipped` + `marker_reason` — the suffix would have changed what runs: the target
+    shell's own parser rejects the line term-use would type (`while true`, `case x in`,
+    `function f()`, a background `&`, a dangling operator, a heredoc, a trailing
+    comment, an unbalanced quote are examples, not the list), or the shell does not
+    speak `$?` (fish, csh), or its command word is not one term-use narrates (a bash
+    binary under another name is still skipped). That line has no fact channel: anchor
+    a `--until 'regex' --since-send`, or print a sentinel yourself where the command's
+    own text allows it. `--done`/`--cmd-done` refuse it rather than lend it an earlier
+    marker, and the result carries `marker_hint` with the next move.
   A send that does not submit (text, no Enter) reports no `marker` field at all, and so
   does a bare Enter with nothing pending — there is no line to mark. When Enter arrives
   as its own send, the pending line is read back from the recording and marked then, so
@@ -67,6 +75,24 @@ is literally `default` (`-n default:inner:0.0`).
   append off entirely.
 - Warns `tty-echo-broken` when your text produced no echo bytes (the program mangled the
   tty — run `fix-tty`).
+
+## When the channel refuses
+
+term-use narrates one complete command in a shell whose `$?` it can read and whose own
+parser accepts the line *with the suffix* (`shell -n`). That is a property of the shape,
+not a list of supported shells: when the shape does not fit, anchor the work yourself.
+
+| refusal | what is still true | do |
+|---|---|---|
+| `marker: skipped` | the line runs exactly as typed; no marker | `--done`/`--cmd-done` refuse it; submit a marker you own, in the target's language, in the same send — or `wait --until 'regex' --since-send` |
+| `marker: paused` | the tty belongs to a program or a previous command; your input goes through verbatim; no marker was attached | `--done`/`--cmd-done` refuse it; drive the program with its own prompts/output; `--shell-ready` after it exits; never force a marker into it |
+| `no-shell-integration` | no done marker can arrive from the shell, and this server has no native status | start a shell term-use can inject into; own a marker; `--until`; `--exit` when the program is the pane |
+| `shell-protocol-unavailable` | the foreground is not the shell `start` launched, so its markers cannot answer | `--until --since-send`, `out`, or your own marker; on tmux 3.8 the native channel may still answer markers from the far side |
+| `unmanaged-pane` | term-use has no recording of this pane | `screen`, `--until`/`--quiet-ms` (degraded), `--exit`; start your own session for facts |
+
+The shell and program names elsewhere in this reference are examples, not a support
+list: the condition is always the same — the fact channel cannot see a completion, so
+change channel.
 
 ## wait
 
@@ -77,8 +103,8 @@ Defaults: `--timeout 10`, `--interval 0.1`. `--until` is Python `re` with DOTALL
 
 | Oracle | Confidence | Proves |
 |---|---|---|
-| `--done` | the chosen oracle's | the last thing you sent finished; picks `osc133` → `shell-ready-probe` → `pane-exit` → `quiet-sampling` and reports it in `via`/`channel` |
-| `--cmd-done` | fact | an OSC 133 `D` marker arrived after your last send (also reads VSCode's OSC 633) **and is bound to that send** — see Attribution below |
+| `--done` | the chosen oracle's | the last thing you sent finished; picks the shell protocol (native `tmux-command-status` where the baseline has evidence, otherwise `osc133`), then `shell-ready-probe` → `pane-exit` → `quiet-sampling`, and reports what actually answered in `via`/`channel`. A send whose marker was `paused`/`skipped`/`none` is refused (`shell-protocol-unavailable`) — an earlier command's marker cannot answer it |
+| `--cmd-done` | fact | an OSC 133 `D` marker arrived after your last send (also reads VSCode's OSC 633) **and is bound to that send** — see Attribution below. It refuses a markerless send for the same reason |
 | `--shell-ready` | fact | the shell answers a `true` probe — i.e. it holds the terminal again |
 | `--exit` | fact | the pane died (needs `remain-on-exit`); signal name normalized |
 | `--until 're'` | inference | text is on the screen. `echo_suspect: true` + downgrade to `heuristic` when it is your own typed text |
@@ -95,15 +121,25 @@ pixels, not completion** |
 
 **Attribution — why a marker inside your window is not yet an answer.** `send` draws the
 window at the recording's current size, and the recorder lags the pane: inject while the
-shell is busy and the *previous* command's `C` and `D` both land inside it. term-use
-accepts such a marker only when it can bind it to the send that caused it — the echo of
-the text you typed sits between the offset and that `C` (tmux orders a pane's stream, so
-bytes from before your injection cannot come after your echo), or, for a keys-only send,
-the recording was quiet when `send` measured it. When neither holds the wait keeps
-failing and the timeout evidence carries `"degraded": "unattributed-marker"`. What to do:
-type the command with `--type` (a typed line carries its own binding) instead of sending
-bare keys, use `--shell-ready` to ask the shell directly, or run the pane on tmux 3.8+,
-where the native channel binds a completion to a *start time* and needs no binding at all.
+shell is busy and the *previous* command's `C` and `D` both land inside it. Two rules
+hold the claim together:
+
+- **send side:** a new marker-bearing line is only narrated when the previous
+  marker-bearing send has reported its completion (`last_marker_offset` + its `D`, or,
+  for a shell marker on tmux 3.8, native start/end evidence). Otherwise the line is
+  `paused`, carries no marker, and `--done`/`--cmd-done` refuse it.
+- **wait side:** for a marker the shell itself emitted, term-use accepts it only when
+  the echo of the typed text sits between the offset and the authorizing `C`, or, for a
+  keys-only send, the recording was quiet when `send` measured it. The echo position is
+  `(event, offset inside the event)`: a frozen recorder can deliver the previous
+  command's markers and the echo as one event, and only the in-event offset orders
+  them.
+
+When neither holds the wait keeps failing and the timeout evidence carries
+`"degraded": "unattributed-marker"`. What to do: wait for the previous command before
+sending the next one, type the command with `--type` instead of bare keys, use
+`--shell-ready` to ask the shell directly, or run the pane on tmux 3.8+, where the
+native channel binds a completion to a *start time* and needs no echo binding.
 
 **When the shell reports nothing at all**, `send` appends a completion sentinel of its own
 (see `## send`) so the exit code still arrives as a `fact` — and the met verdict then says
@@ -160,8 +196,8 @@ Unmanaged panes (no `state.json`): `--until`/`--quiet-ms` run screen-only with
 - `out -n N [--all] [--max-bytes K] [--json]` — the pane's own byte stream since your last
   send (or the whole session), head+tail with `interior bytes omitted` marked. `--json`
   states `since_offset`, where the window begins, so "the row is not in here" can be told
-  apart from "my window starts after it" (an ab8 arm could not tell, and re-verified a
-  non-idempotent step three times). It is the **unwrapped byte stream**: a long typed
+  apart from "my window starts after it" — those are different findings and only one of
+  them is worth re-running a non-idempotent step for. It is the **unwrapped byte stream**: a long typed
   command appears whole, whereas a wait's `evidence.screen` shows it broken at the pane
   width. Both are the pane's truth at different layers — neither rewrites the other.
   *pane*, so it contains your echoed input line and the prompt that follows; a trailing

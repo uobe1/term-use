@@ -166,7 +166,7 @@ release — do not bake a ref into them. Clone a branch only when you need somet
 not yet merged:
 
 ```bash
-git clone -b v2.0a6 https://github.com/uobe1/term-use.git && cd term-use
+git clone -b v2.0a7 https://github.com/uobe1/term-use.git && cd term-use
 uv tool install . --with pillow        # or `uv tool install -e .` to hack on it
 ```
 

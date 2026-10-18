@@ -60,6 +60,7 @@ $TD start -n td24r --cmd bash --socket "$SOCK" --width 40 --height 6 \
 import json, sys
 r = json.load(sys.stdin)
 assert r["recorder"] is True, f"a working recorder must be reported: {r}"
+assert r.get("marker") == "shell", f"an injected bash must say which channel it expects: {r}"
 ' || fail "start recorder status"
 $TD stop -n td24r >/dev/null
 

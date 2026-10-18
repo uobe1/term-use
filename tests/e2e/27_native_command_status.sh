@@ -25,13 +25,22 @@ cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; 
 trap cleanup EXIT
 fail() { echo "E2E-27 FAIL: $*"; exit 1; }
 
+# A shell whose integration is guaranteed: a user's themed ~/.bashrc can take
+# the prompt machinery back (the device does exactly that), and then a command
+# blocked on `read` emits no C for tmux to see. This rcfile is self-contained.
+cat > "$TMP/clean.bashrc" <<'RC'
+PS1='\[\e]133;B\a\]tu-clean$ '
+PS0='\[\e]133;C\a\]'
+PROMPT_COMMAND='__tu_ec=$?; printf "\e]133;D;%s\a\e]133;A\a" "$__tu_ec"'
+RC
+
 VER="$(tmux -V | awk '{print $2}')"
 NATIVE=0
 case "$VER" in 3.8 | 3.9 | next-*) NATIVE=1 ;; esac
 echo "tmux $VER -> native command status expected: $NATIVE"
 
-$TD start -n td27 --cmd bash --socket "$SOCK" --width 90 --height 25 >/dev/null \
-  || fail "start failed"
+$TD start -n td27 --cmd "bash --rcfile $TMP/clean.bashrc -i" \
+  --socket "$SOCK" --width 90 --height 25 >/dev/null || fail "start failed"
 PANE="$(tmux -L "$SOCK" display-message -p -t td27 '#{pane_id}')"
 
 # --- 1. the meta surface is version-shaped, never shaped like an answer -----
@@ -77,7 +86,58 @@ assert v['conditions'][0]['exit_code'] == 0, v
     fail "raw.log still received pane output, so the recorder was never blind"
   fi
 
-  # --- 3. a C with no D: show tmux's reading, do not pick a story -----------
+  # --- 3. native is an oracle, not a fallback -------------------------------
+  # A plain `sh` gets no injected hooks. With pipe-pane detached there is no
+  # recording to prove integration, yet tmux parses the sentinel's markers:
+  # the integration gate, the --done oracle and the timeout evidence must all
+  # use the native channel instead of refusing or sampling.
+  $TD start -n td27n --cmd sh --socket "$SOCK" --width 90 --height 25 >/dev/null \
+    || fail "start (sh) failed"
+  $TD wait -n td27n --socket "$SOCK" --until '[$#]' --timeout 10 >/dev/null \
+    || fail "sh prompt never appeared"
+  PANE2="$(tmux -L "$SOCK" display-message -p -t td27n '#{pane_id}')"
+  tmux -L "$SOCK" pipe-pane -t "$PANE2" >/dev/null 2>&1 || fail "detach sh recorder"
+  $TD send -n td27n --socket "$SOCK" --type "echo TD27_SH" --key Enter >/dev/null
+  $TD wait -n td27n --socket "$SOCK" --cmd-done --timeout 15 >"$TMP/sh-done.json" 2>&1 \
+    || fail "--cmd-done refused a native-only pane"
+  python3 -c "
+import json
+v = json.load(open('$TMP/sh-done.json'))
+assert v['confidence'] == 'fact' and v.get('via') == 'tmux-command-status', v
+assert v['conditions'][0]['exit_code'] == 0, v
+" || fail "native-only --cmd-done (see above)"
+  $TD wait -n td27n --socket "$SOCK" --done --timeout 5 >"$TMP/sh-oracle.json" 2>&1 \
+    || fail "--done must pick the native oracle on a native-only pane"
+  python3 -c "
+import json
+v = json.load(open('$TMP/sh-oracle.json'))
+assert v.get('via') == 'tmux-command-status', v
+" || fail "native oracle choice (see above)"
+  $TD screen -n td27n --socket "$SOCK" --meta >"$TMP/sh-meta.json" || fail "screen --meta (sh)"
+  python3 -c "
+import json
+m = json.load(open('$TMP/sh-meta.json'))
+assert m.get('last_output_age_source') == 'tmux', m
+assert isinstance(m.get('last_output_age_s'), (int, float)), m
+" || fail "native output age (see above)"
+  $TD stop -n td27n --socket "$SOCK" >/dev/null
+
+  # A pane that never wrote an o-event has no raw-stream gate to read. On 3.8
+  # the screen-stability gate still answers, and the verdict says the recorder
+  # was blind instead of pretending the stream was sampled.
+  $TD start -n td27q --cmd "sleep 120" --socket "$SOCK" --width 60 --height 10 >/dev/null \
+    || fail "start (quiet blind) failed"
+  $TD wait -n td27q --socket "$SOCK" --quiet-ms 300 --timeout 5 >"$TMP/quiet-blind.json" \
+    || fail "a blank pane with a blind recorder never settled"
+  python3 -c "
+import json
+v = json.load(open('$TMP/quiet-blind.json'))
+assert v['verdict'] == 'met' and v['confidence'] == 'heuristic', v
+assert v['conditions'][0].get('degraded') == 'recorder-blind', v
+" || fail "recorder-blind quiet (see above)"
+  $TD stop -n td27q --socket "$SOCK" >/dev/null
+
+  # --- 4. a C with no D: show tmux's reading, do not pick a story -----------
   # `read` is a builtin, so the foreground stays bash while no completion
   # marker arrives and the pane goes quiet. A prompt framework that swallowed
   # PROMPT_COMMAND leaves *exactly* the same mark, so the answer has to carry

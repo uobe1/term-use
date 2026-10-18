@@ -42,6 +42,9 @@ $TD out   -n demo                       # what it printed, inside a context budg
 
 That is the whole loop: **start → send → wait for fact → read the output → act.**
 
+- `start`'s result carries `marker: shell|sentinel|unknown` — the completion
+  channel it expects. `unknown` means the first send or `--shell-ready` will tell;
+  a `skipped`/`paused` send carries `marker_hint` with the channel that still works.
 - `--done` waits for the last thing you sent to finish, choosing the strongest
   oracle the target actually supports and reporting it in `via`: the shell's
   OSC 133 done-marker (fact, with exit code) → the `true` probe when nothing has
@@ -52,23 +55,34 @@ That is the whole loop: **start → send → wait for fact → read the output �
   appends a completion sentinel (`; __tu_ec=$?; printf '\033]133;C\a\e]133;D;%s\a'
   "$__tu_ec"`) to the line it submits, so the code arrives as bytes term-use wrote —
   the send result says `marker: sentinel`, the met verdict says the same in its
-  `note`, and the line on screen is visibly longer than what you typed. Lines the
+  `note`, and the line on screen is visibly longer than what you typed. The appended
+  printf is the line's last stage, so a later command's `$?` is 0; read the code from
+  the verdict, not from `$?`. Lines the
   suffix could change in meaning (a background `&`, a dangling pipe, an open
   `then`/`do`, a heredoc, a comment, an unbalanced quote) and shells that do not
   speak `$?` (fish, csh) are left alone: `marker: skipped` with the reason, and no
   fact is claimed. Tracking also **pauses** when the last tracked line never reported
-  back — a REPL or `ssh` holds the tty then, and appending shell syntax to its input
-  would corrupt it; it resumes once that marker finally arrives.
+  back — a REPL or `ssh` may hold the tty, or the previous command is still in flight —
+  and appending shell syntax would either corrupt that program's input or make the new
+  marker unattributable; it resumes once the outstanding marker arrives. A send whose
+  marker was `paused`/`skipped` has no completion event of its own, so
+  `--done`/`--cmd-done` refuse it (`shell-protocol-unavailable`) instead of borrowing
+  an earlier command's marker; use `--until --since-send`, or own a marker.
   `TERM_USE_SENTINEL=0` refuses the append even when it would help.
 - The done-marker oracle has two servers. The CLI asks **tmux** first, and when that is
   what answered you get `via: tmux-command-status` plus a `channel` key naming it;
   otherwise term-use scans its own recording (`via: osc133`). The native answer is the
   one that survives a stopped recorder, a prompt
   framework that rewrites `PROMPT_COMMAND`, and markers forwarded through ssh —
-  which is why tmux 3.8+ is required.
+  which is why tmux 3.8+ is required. On 3.8 the native group is also the
+  integration gate (a detached recorder does not turn a fact wait into
+  `no-shell-integration`), a reader of the timeout's `in_flight` (a running
+  command stays in-flight when the recording is blind), and the source of
+  `screen --meta`'s `last_output_age_s` when it can answer
+  (`last_output_age_source: tmux`).
 - When no fact channel can answer, that is said out loud: `--cmd-done` /
   `--shell-ready` / `--done` raise `shell-protocol-unavailable` (the pane's
-  foreground is `ssh`/`mosh`/a nested `tmux`, or the injected hooks were
+  foreground is not the shell that was started, or the injected hooks were
   replaced) instead of timing out and hinting at a quit key. `evidence.native`
   then carries tmux's own reading — but `running: true` does **not** mean "your
   command is still going": a shell blocked on `read` and a shell whose completion
@@ -78,10 +92,12 @@ That is the whole loop: **start → send → wait for fact → read the output �
   confirms the shell took input back — a live interactive program swallows the
   probe, and the wait fails with `shell-not-ready` instead of pretending.
 - The shell protocol behind `--cmd-done` is injected for bash and zsh; fish ≥ 4.0
-  emits the markers itself and term-use notices rather than assuming. A shell
-  that cannot emit them (plain `sh`/`dash` — no pre-exec hook) gets a structured
-  `no-shell-integration`, so fall back to `--until` on the program's own output,
-  or `--exit` on pane death.
+  emits the markers itself and term-use notices rather than assuming. A POSIX
+  shell whose prompt was taken over gets term-use's own sentinel on send, and on
+  tmux 3.8 the native channel can answer even when the recording cannot. A shell
+  that can neither emit markers nor carry the sentinel (or whose line is
+  `skipped`) gets a structured `no-shell-integration`: fall back to `--until` on
+  the program's own output, or `--exit` on pane death.
 - A wrong `--expect-code` fails **immediately** with `expect-code-mismatch` —
   no timeout burn.
 - Pane death mid-wait fails immediately (`pane-dead` / `pane-dead-by-signal`
@@ -208,7 +224,8 @@ picture per layout question, never a series, and never to decide what to type.
 
 ```bash
 $TD screen -n demo --meta                          # cursor, modes, history, blank, stall signals
-#    plus pane_command_running / pane_command_status / pane_command_duration:
+#    plus pane_command_running / pane_command_status / pane_command_duration /
+#    pane_last_output_time:
 #    "a command started and has not finished" is fact there, even through ssh — but
 #    running:true also describes a shell merely waiting for input, so read
 #    evidence.screen before acting on it. Absent (not empty) without command tracking.

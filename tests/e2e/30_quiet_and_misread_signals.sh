@@ -106,8 +106,8 @@ assert 'failed unseen' in n and 'echo TD30_COMPOUND' in n, \
 " || fail "compound-line scope (see above)"
 
 # --- 1e. `clear` in a plain shell is not a program that repositions text -----
-# The ab8 baseline arm read a *correct* ledger, saw the redraw note, and did not
-# believe it — two extra verification rounds on a non-idempotent program.
+# A false redraw note makes an agent distrust a *correct* read and re-verify a
+# non-idempotent program, so `clear` must not raise it.
 $TD send -n td30 --socket "$SOCK" --type "clear; echo TD30_CLEARED" --key Enter >/dev/null
 $TD wait -n td30 --socket "$SOCK" --done --timeout 15 >/dev/null \
   || fail "clear+echo never finished"

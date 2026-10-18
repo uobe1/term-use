@@ -225,11 +225,9 @@ def _family(path: str) -> str:
     """Family token of a font file name: version digits and style words out.
 
     Seven `unifont-15.1.05*.otf` files are one family, and a family gets one
-    slot. Without this the variants filled the whole fallback budget and the
-    CJK face further down the directory listing was never opened (measured on
-    this box: `wqy-zenhei.ttc` ranked 34th of 35, unreachable behind four
-    unifonts — which is how issue #3's tofu was produced here, not only on the
-    reporter's device).
+    slot. Without this the variants fill the whole fallback budget and the CJK
+    face further down the directory listing is never opened, which is how a
+    machine that had a CJK face still produced tofu.
     """
     stem = os.path.splitext(os.path.basename(path))[0].lower().replace("_", "-")
     stem = re.sub(r"\d+(\.\d+)*", "", stem)
@@ -245,9 +243,10 @@ def fallback_fonts(primary: str, need: set[str] | None = None,
     Ranking by filename alone was the bug: the strongest-named hint won, so a
     box full of one family got a chain of near-duplicates and no CJK. When the
     caller passes `need` (the codepoints the primary face cannot draw), each
-    candidate's cmap is opened and scored on those, a face covering none of
-    them is dropped entirely, and the scan stops once the chain can draw
-    everything — so an ASCII screen pays for no fallback loading at all.
+    candidate's cmap is opened and scored on those, and the scan stops once the
+    chain can draw everything — so an ASCII screen pays for no fallback loading
+    at all. A face whose cmap cannot be read is not zero coverage: it goes to
+    the tail as an unproven candidate, after every face that can prove a hit.
     """
     seen, by_family = {os.path.realpath(primary)}, {}
     for p in _candidate_paths(font_dirs()):
@@ -268,7 +267,8 @@ def fallback_fonts(primary: str, need: set[str] | None = None,
                    os.path.basename(p).lower(), p) for p in picked]
         return [p for _s, _n, p in sorted(scored, key=lambda t: (t[0], t[1]))][:limit]
     wanted = set(need)
-    out: list[str] = []
+    known: list[str] = []
+    unknown: list[str] = []
     for p in sorted(picked, key=lambda q: (
             0 if any(h in os.path.basename(q).lower()
                      for h in ("noto", "source-han", "cjk", "droid", "wqy")) else 1,
@@ -276,14 +276,21 @@ def fallback_fonts(primary: str, need: set[str] | None = None,
         if not wanted:
             break
         face = ttffont.load(p)
-        hit = {ch for ch in wanted if face.covers(ch)}
-        if not hit:
-            continue                      # covers nothing this screen needs
-        wanted -= hit
-        out.append(p)
-        if len(out) >= limit:
-            break
-    return out
+        answers = {ch: face.covers(ch) for ch in wanted}
+        hit = {ch for ch, verdict in answers.items() if verdict}
+        if hit:
+            wanted -= hit
+            known.append(p)
+            if len(known) >= limit:
+                break
+        elif any(verdict is None for verdict in answers.values()):
+            # Unreadable cmap: coverage is unknown, not zero. Keep it as a last
+            # resort — `_Chain.pick` trusts an unknown face — but let every face
+            # that can prove coverage answer first.
+            unknown.append(p)
+    if not wanted:
+        return known[:limit]
+    return (known + unknown)[:limit]
 
 
 class _Chain:
@@ -454,8 +461,8 @@ def render(grid: list, out_path: str, cols: int | None = None,
     palette = False
     # PNG only. A terminal screen uses far fewer than 256 colors, so an
     # exact-count palette is lossless and roughly 7x smaller than the same
-    # pixels — and JPEG was larger still on the screens we measured, so the
-    # second format bought nothing but a flag to remember.
+    # pixels — and JPEG was larger still on terminal screens, so the second
+    # format bought nothing but a flag to remember.
     colors = img.getcolors(maxcolors=256)
     if colors:
         img = img.quantize(colors=len(colors), method=Image.Quantize.MEDIANCUT,

@@ -25,7 +25,13 @@ class OSC133Scanner:
         self.events: list[dict] = []
 
     def feed(self, text: str) -> list[dict]:
-        """Consume more stream text; return events completed by this chunk."""
+        """Consume more stream text; return events completed by this chunk.
+
+        Each event carries `offset`: its position in *this* chunk. When a chunk
+        is one lagged o-event, two markers before and after the typed echo share
+        the event's file position; the offset is what orders them.
+        """
+        carry = len(self.buf)
         self.buf += text
         produced: list[dict] = []
         i = 0
@@ -34,10 +40,12 @@ class OSC133Scanner:
             if self.buf[i] != "\x1b":
                 i += 1
                 continue
+            start = i
             end, event = self._match(self.buf, i)
             if end is None:  # incomplete sequence: wait for more bytes
                 break
             if event is not None:
+                event["offset"] = max(0, start - carry)
                 produced.append(event)
             i = end
         self.buf = self.buf[i:]

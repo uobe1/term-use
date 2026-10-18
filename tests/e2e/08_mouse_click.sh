@@ -7,6 +7,8 @@ export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 TD="python3 -m termuse"
 SOCK="td08sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }

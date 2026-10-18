@@ -7,6 +7,7 @@ faces, zero disagreements). A format-4 offset bug here is silent and expensive:
 the renderer would draw a hollow "missing" box for a glyph the font has.
 """
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -90,6 +91,26 @@ def test_unparseable_font_degrades_to_unknown_not_a_crash():
         assert f.covers("a") is None, "unknown, so the caller trusts the font"
     finally:
         os.unlink(path)
+
+
+def test_an_unreadable_subtable_does_not_erase_a_readable_one():
+    """A font may carry several cmap subtables. Coverage is their union: a format
+    we cannot read (6, 0, 8…) must not flip the whole face back to "unknown"
+    after a format 4/12 already answered — that is how a CJK fallback with one
+    exotic subtable was dropped from a chain that could have drawn the screen."""
+    # format 12 with one group mapping 'A' (0x41) to glyph 1
+    fmt12 = struct.pack(">HHIII", 12, 0, 28, 0, 1) + struct.pack(">III", 0x41, 0x41, 1)
+    # format 6, unreadable to this parser (rare/unsupported here)
+    fmt6 = struct.pack(">HHHHH", 6, 10, 0, 0, 0)
+    face = ttffont.Face.__new__(ttffont.Face)
+    face._data = fmt12 + fmt6
+    face._fmt4, face._fmt12 = [], []
+    face._unknown = True
+    face._read_cmap(0)                 # readable: the face can answer
+    face._read_cmap(len(fmt12))        # unreadable: must not undo that
+    assert face._unknown is False
+    assert face.covers("A") is True
+    assert face.covers("B") is False
 
 
 def test_supports_helper_aggregates():

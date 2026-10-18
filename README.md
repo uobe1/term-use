@@ -6,7 +6,7 @@ over **interactive terminal programs** — shells, nano/vim, REPLs, animated TUI
 agent-first: the documentation is written *for* the agent, the CLI is its tool
 interface, and every answer arrives with evidence attached.
 
-![version](https://img.shields.io/badge/version-2.0.0a6-orange)
+![version](https://img.shields.io/badge/version-2.0.0a7-orange)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
 ![requires](https://img.shields.io/badge/external%20dep-tmux%203.8%2b-1BB91F)
 ![issues](https://img.shields.io/github/issues/uobe1/term-use)

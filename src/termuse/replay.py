@@ -13,9 +13,8 @@ Two engines, because they answer different questions:
                a throwaway pane on a private socket, and capture what it paints.
                tmux is the emulator that produced the recording, so there is no
                second implementation to disagree with — which is why this is
-               here instead of pyte (measured: pyte diverges from tmux on 8 of
-               23 modern sequences, including no alt-screen at all, and drops
-               data on ZWJ emoji).
+               here instead of pyte: it diverges on modern sequences, has no
+               alt-screen, and drops data on ZWJ emoji.
 
 The scratch pane runs `stty raw -echo; cat`: writing to a pane's tty delivers
 bytes to the program's *stdin*, so something inside has to echo them back out
@@ -35,11 +34,9 @@ from termuse.errors import TDError
 # Python traceback) and a bare `\x1b[H` (bash repainting its own prompt on C-l);
 # that false positive sends the reader on a `replay` detour for no reason.
 # A bare `\x1b[2J` went the same way: `clear` in a plain shell emits it, and the
-# warning then told an agent not to trust a correct read of an artifact file —
-# measured in the ab8 round, where the arm built a second and third verification
-# read because of it. A program that really repaints still matches: alt-screen,
-# absolute positioning or cursor-up. Bracketed paste (`?2004`) and color codes
-# are not redraw.
+# warning then told an agent not to trust a correct read of an artifact file.
+# A program that really repaints still matches: alt-screen, absolute positioning
+# or cursor-up. Bracketed paste (`?2004`) and color codes are not redraw.
 _REDRAW_RE = re.compile(
     r"\x1b\[\?(?:47|1047|1049)h"      # enter alternate screen
     r"|\x1b\[\d+;\d+H"                 # absolute cursor position
