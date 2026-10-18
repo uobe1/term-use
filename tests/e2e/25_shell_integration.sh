@@ -47,7 +47,16 @@ assert v["confidence"] == "fact", f"{v}"
 
 echo "E2E-25 shells:"
 probe_shell zsh
-probe_shell fish
+if command -v fish >/dev/null; then
+  # The premise is fish >= 4.0 (it emits OSC 133 natively); an older fish is
+  # not a product failure, and this box's package may well be one.
+  fish_major=$(fish --version 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  if [ "${fish_major:-0}" -ge 4 ] 2>/dev/null; then
+    probe_shell fish
+  else
+    echo "  (skip: fish ${fish_major:-unknown} < 4.0 emits no OSC 133)"
+  fi
+fi
 
 # --- zsh injection must not swallow the user's own configuration -----------
 if command -v zsh >/dev/null; then

@@ -33,7 +33,10 @@ $TD wait -n "$NAME" --until 'SELECTED:0' --timeout 10 >/dev/null || fail "fixtur
 
 # --- control: one call with two Ups is debounced to a single move ---
 $TD send -n "$NAME" --key Up --key Up >/dev/null || fail "send failed"
-sleep 1
+# The gap must be wider than the debounce window: the first repetition is a
+# separate process, and on a fast box it can arrive within the window measured
+# from the control's applied Up. Sleep past it before starting the repeat.
+sleep 2
 [ "$(selected)" = "SELECTED:1" ] || fail "one-call two Ups should move once, got: $(selected)"
 
 # --- --repeat 2 --delay 2.2 (> the debounce window): each repetition is a full
