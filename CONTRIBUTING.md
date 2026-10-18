@@ -31,7 +31,7 @@ Format `vX.Y[.Z]aN` / `vX.Y[.Z]bN` / `vX.Y[.Z]`, where `X` is the major version 
 
 `N` counts iterations within that line and resets when `X.Y` advances
 (`2.0.0a9` → `2.1.0a1`). `pyproject.toml` carries the same number without the `v`
-(`2.0.0a7`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
+(`2.0.0a8`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
 
 **Three lines, three branches** — alpha, beta, and formal advance independently; they
 are *not* force-synced. Routing:
