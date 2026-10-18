@@ -52,7 +52,7 @@ That is the whole loop: **start → send → wait for fact → read the output �
   program *is* the pane → quiet sampling (heuristic, and it says so). `advice`
   names a stronger channel when the target could support one.
 - A shell that emits **no** markers is not the end of the fact channel. `send`
-  appends a completion sentinel (`; __tu_ec=$?; printf '\033]133;C\a\e]133;D;%s\a'
+  appends a completion sentinel (`; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007'
   "$__tu_ec"`) to the line it submits, so the code arrives as bytes term-use wrote —
   the send result says `marker: sentinel`, the met verdict says the same in its
   `note`, and the line on screen is visibly longer than what you typed. The appended

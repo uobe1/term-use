@@ -72,6 +72,25 @@ def main():
         time.sleep(0.3)
         assert quiet2.evaluate(Ctx()) is True
         assert quiet2.degraded == "recorder-blind"
+
+        # A stream that writes only non-painting bytes is not a blind recorder:
+        # Gate 1 has nothing to time, but the recorder is working, and the
+        # verdict must say "nothing painted" (silent_unproven), not "blind".
+        title = records.session_dir("q3")
+        title.mkdir(parents=True, exist_ok=True)
+        (title / "raw.log").write_text(
+            header + "\n" + json.dumps([0.1, "o", "\x1b]0;spinner-1\x07"]) + "\n",
+            encoding="utf-8")
+        (title / "state.json").write_text(
+            json.dumps({"session": "q3", "last_send_offset": 1}),
+            encoding="utf-8")
+        quiet3 = waiting.QuietCondition("q3", 300, managed=True)
+        assert quiet3.evaluate(Ctx()) is False
+        assert quiet3.evaluate(Ctx()) is False
+        time.sleep(0.3)
+        assert quiet3.evaluate(Ctx()) is True
+        assert quiet3.degraded is None, quiet3.degraded
+        assert quiet3.silent_unproven is True
     finally:
         if old is None:
             os.environ.pop("XDG_STATE_HOME", None)

@@ -63,7 +63,8 @@ def load_state_or_none(session: str) -> dict | None:
         return None
 
 
-def assert_recorded_pane(target: tmuxio.Target, state: dict | None) -> None:
+def assert_recorded_pane(target: tmuxio.Target, state: dict | None,
+                         require_current: bool = False) -> None:
     """Refuse to answer for one pane using another pane's evidence.
 
     `start` records the pane it made (`%N` in state.json) while
@@ -72,8 +73,16 @@ def assert_recorded_pane(target: tmuxio.Target, state: dict | None) -> None:
     to the recorded one. Reported as `unmanaged-pane` because the obligation is
     identical: no records describe this pane, so facts refuse and the screen
     channels still work.
+
+    `require_current` is for commands that act on the addressed pane (send,
+    wait, clear, mouse): a bare session name resolves to its *active* window,
+    which a new window can move away from the recorded pane, so the check runs
+    even without a suffix. Read-only consumers of the recording (`out`, `trace`,
+    `replay`) only need it when the caller names a different pane explicitly.
     """
     if state is None or not state.get("pane_id"):
+        return
+    if not require_current and target.window is None and target.pane is None:
         return
     res = tmuxio.tmux("display-message", "-p", "-t", target.to_arg(), "-F",
                       "#{pane_id}", socket=target.socket)
@@ -87,8 +96,8 @@ def assert_recorded_pane(target: tmuxio.Target, state: dict | None) -> None:
             f"{target.session!r}'s records belong to {state['pane_id']}",
             hint="the recording, last_send_offset and OSC 133 markers describe "
                  "the pane `start` made, so nothing about it can be proved from "
-                 "this one: address the session without a window/pane suffix "
-                 "(`-n NAME`), or start this pane with `term-use start` as well",
+                 "this one: address the recorded pane explicitly, or start the "
+                 "pane you mean with `term-use start` as well",
             evidence={"addressed_pane": actual,
                       "recorded_pane": state["pane_id"]})
 
@@ -217,7 +226,8 @@ def cmd_start(args) -> int:
                  ["C-d"], [])
     writer.append("m", {"event": "start", "recorder": attached})
     marker = ("shell" if writer.state.get("shell_integration")
-              else "sentinel" if waiting.sentinel_possible(writer.state)
+              else "sentinel" if (waiting.sentinel_possible(writer.state)
+                                  and waiting.shell_owns_the_pane(args.cmd))
               else "unknown")
     result = {"ok": True, "session": args.name, "socket": args.socket,
               "pane_id": pane_id, "width": args.width,
@@ -308,7 +318,7 @@ def cmd_send(args) -> int:
         raise TDError("invalid-arguments", f"--delay must be >= 0 (got {delay})")
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
-    assert_recorded_pane(target, state)
+    assert_recorded_pane(target, state, require_current=True)
     # Records only for managed sessions: creating a V2Writer would mkdir a
     # state dir as a side effect — unmanaged panes (nested tmux) must not
     # accumulate bogus record dirs.
@@ -355,7 +365,8 @@ def cmd_send(args) -> int:
             if line:
                 marker, marker_reason = waiting.marker_plan(
                     target.session, state, line,
-                    enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+                    enabled=os.environ.get("TERM_USE_SENTINEL") != "0",
+                    probe_wait_s=waiting.marker_probe_wait(state))
                 if marker in ("sentinel", "shell") and not \
                         waiting.previous_marker_answered(target.session, state,
                                                          native_meta,
@@ -449,6 +460,7 @@ def cmd_send(args) -> int:
 def cmd_fix_tty(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = records.read_state(target.session)
+    assert_recorded_pane(target, state, require_current=True)
     writer = records.V2Writer(target.session)
     offset, settled = records.drain_offset(target.session)
     stamp_native_baseline(target, state)
@@ -487,6 +499,7 @@ def cmd_screen(args) -> int:
                      "[--grid|--runs|--grep|--find TEXT|--element-at X Y]` for "
                      "what is on the screen")
         state = load_state_or_none(target.session)
+        assert_recorded_pane(target, state, require_current=True)
         m = tmuxio.meta(target)
         text = tmuxio.capture(target, ("-N", "-e"))
         stats = tdscreen.grid_stats(tdscreen.parse_grid(text))
@@ -712,7 +725,7 @@ def _exit_code_of(conditions: list) -> int | None:
 def cmd_wait(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
-    assert_recorded_pane(target, state)
+    assert_recorded_pane(target, state, require_current=True)
     writer = records.V2Writer(target.session) if state else None
     if state is not None and writer is not None \
             and not state.get("shell_integration") \
@@ -766,7 +779,8 @@ def cmd_wait(args) -> int:
         native_meta = stamp_native_baseline(target, state)
         probe_marker, _why = waiting.marker_plan(
             target.session, state, probe_text,
-            enabled=os.environ.get("TERM_USE_SENTINEL") != "0")
+            enabled=os.environ.get("TERM_USE_SENTINEL") != "0",
+            probe_wait_s=waiting.marker_probe_wait(state))
         if probe_marker in ("sentinel", "shell") and not \
                 waiting.previous_marker_answered(target.session, state,
                                                  native_meta, prev_native):
@@ -986,9 +1000,10 @@ def cmd_wait(args) -> int:
                 # or an agent reads it as evidence about the user's integration.
                 _add_note(verdict,
                           "The completion marker here is term-use's own "
-                          "sentinel — this shell emits no OSC 133, so the code "
-                          "is `$?` read by the printf appended to your line, "
-                          "and it covers its last stage only.")
+                          "sentinel: no OSC 133 marker had reached the "
+                          "recording when this line was sent, so the code is "
+                          "`$?` read by the printf appended to your line, and "
+                          "it covers its last stage only.")
             print(json.dumps(verdict, ensure_ascii=False))
             tdbudget.warn(verdict_ctx, target.session)
             return 0
@@ -1064,6 +1079,7 @@ def cmd_out(args) -> int:
             hint="use `screen -n NAME` for the visible text of an unmanaged "
                  "pane, or start the target with term-use start to get the "
                  "recorded stream")
+    assert_recorded_pane(target, state)
     offset = 0 if args.all else int(state.get("last_send_offset", 0))
     raw = records.stream_since(target.session, offset)
     text = replay.linear(raw)
@@ -1113,6 +1129,8 @@ def cmd_replay(args) -> int:
                       "image channel disabled by TERM_USE_DISABLE_IMAGE=1",
                       hint="this session runs heuristics-only; use the text channels")
     target = resolve_target(args.name, getattr(args, "socket", None))
+    state = load_state_or_none(target.session)
+    assert_recorded_pane(target, state)
     head = records.header(target.session)
     if head is None:
         raise TDError(
@@ -1138,7 +1156,7 @@ def cmd_replay(args) -> int:
     plain = tdscreen.visible_text(text)
     if args.format == "png":
         out_path = args.o or default_shot_path(target.session, "png",
-                                               load_state_or_none(target.session) is not None)
+                                               state is not None)
         try:
             info = tdscreenshot.render(grid, out_path, cols=cols,
                                        rows=rows, cursor=cursor)
@@ -1173,6 +1191,7 @@ def cmd_replay(args) -> int:
 
 def cmd_mouse_detect(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
+    assert_recorded_pane(target, load_state_or_none(target.session), require_current=True)
     tail = records.stream_since(target.session, 0)[-16384:]
     print(json.dumps(tdinput.mouse_mode(tail), ensure_ascii=False))
     return 0
@@ -1180,6 +1199,7 @@ def cmd_mouse_detect(args) -> int:
 
 def cmd_click(args) -> int:
     target = resolve_target(args.name, getattr(args, "socket", None))
+    assert_recorded_pane(target, load_state_or_none(target.session), require_current=True)
     tail = records.stream_since(target.session, 0)[-16384:]
     mode = tdinput.mouse_mode(tail)
     if not mode["enabled"]:
@@ -1271,6 +1291,7 @@ def cmd_clear(args) -> int:
     """
     target = resolve_target(args.name, getattr(args, "socket", None))
     state = load_state_or_none(target.session)
+    assert_recorded_pane(target, state, require_current=True)
     writer = records.V2Writer(target.session) if state else None
 
     def rows_visible() -> int:
@@ -1313,10 +1334,12 @@ def cmd_clear(args) -> int:
 
 
 def cmd_trace(args) -> int:
-    path = records.session_dir(args.name) / "raw.log"
+    target = resolve_target(args.name, getattr(args, "socket", None))
+    assert_recorded_pane(target, load_state_or_none(target.session))
+    path = records.session_dir(target.session) / "raw.log"
     if not path.exists():
         raise TDError("session-missing",
-                      f"no raw.log for session {args.name!r}",
+                      f"no raw.log for session {target.session!r}",
                       hint="run: term-use start -n <name> --cmd <command>")
     with path.open(encoding="utf-8") as fh:
         for line in fh:

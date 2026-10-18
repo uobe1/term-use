@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -25,7 +26,7 @@ C = "\x1b]133;C\x07"
 D0 = "\x1b]133;D;0\x07"
 
 
-def build(name, payloads, cmd="bash"):
+def build(name, payloads, cmd="bash", integration=False):
     """A recording + state.json shaped like a live session; returns the temp root.
 
     A payload is either a bare string (pane output) or an ("i", records) tuple
@@ -43,7 +44,8 @@ def build(name, payloads, cmd="bash"):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (path.parent / "state.json").write_text(json.dumps({
         "session": name, "socket": None, "cmd": cmd,
-        "shell_integration": False, "last_send_offset": len(lines[0]) + 1}),
+        "shell_integration": integration,
+        "last_send_offset": len(lines[0]) + 1}),
         encoding="utf-8")
     return root
 
@@ -67,6 +69,18 @@ def test_a_shell_that_reports_for_itself_is_left_alone():
     try:
         assert records.shell_markers_proven("s2") is True
         assert plan("s2") == ("shell", None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_injected_shell_with_a_prompt_is_not_narrated_before_its_first_done():
+    """`shell_markers_proven` needs a D as well as A/B; an injected shell that
+    has only painted its first prompt is already integrated, and lengthening
+    the first line there shifts the program's screen."""
+    root = build("s2b", [PROMPT, CMDLINE], cmd="bash", integration=True)
+    try:
+        assert records.shell_markers_proven("s2b") is False
+        assert plan("s2b", "echo hi") == ("shell", None)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -111,10 +125,8 @@ def test_unsafe_lines_are_refused_with_a_reason():
     unsafe = {
         "sleep 1 &": "background",
         "echo a |": "operator",
-        "if x; then": "open block",
         "cat <<EOF": "heredoc",
         "echo hi # note": "comment",
-        'echo "unclosed': "unbalanced",
         "ls \\": "continues",
         "": "nothing",
     }
@@ -124,6 +136,51 @@ def test_unsafe_lines_are_refused_with_a_reason():
     for text in ("ls -la", "make && make install", "for i in 1 2; do echo $i; done",
                  "git commit -m 'msg'", "a | b | c", "docker ps -q | xargs rm"):
         assert waiting.sentinel_refusal(text) is None, text
+
+
+def test_complete_lines_with_quotes_and_keywords_are_not_refused():
+    """Completeness is the shell's question, not a character count. Counting
+    quotes and `then`/`done` tokens refused ordinary commands (`echo done`,
+    `echo "don't"`) before the parser was ever consulted."""
+    for text in ('echo "don\'t panic"',
+                 'git commit -m "fix: it\'s done"',
+                 'echo "a & b"',
+                 "echo done", "echo then",
+                 "case x in a) echo hi;; esac",
+                 "echo $((1 + 2))"):
+        assert waiting.sentinel_refusal(text) is None, text
+
+
+def test_the_parser_still_refuses_an_unclosed_quote():
+    root = build("s12", ["Welcome\n"])
+    try:
+        mode, reason = plan("s12", 'echo "unclosed')
+        assert mode == "skipped" and "parser" in reason, (mode, reason)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_program_pane_is_never_narrated():
+    """A shell invoked with -c or a script operand runs a program; the next
+    line is that program's stdin, so appending shell syntax would corrupt it
+    (e.g. `sh -c python3` executes the suffix). Interactive shells are still
+    narrated, and a program whose stream carries markers is still believed."""
+    for n, cmd in enumerate(("bash -c 'python3'", "bash script.sh",
+                             "sh -c python3", "bash -c 'cat'")):
+        name = f"prog{n}"
+        root = build(name, ["Welcome\n"], cmd=cmd)
+        try:
+            mode, reason = plan(name, "echo hello")
+            assert mode == "skipped", (cmd, mode, reason)
+            assert "program" in reason or "script" in reason, (cmd, reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    root = build("progmarkers", [PROMPT, CMDLINE], cmd="bash -c 'fish'")
+    try:
+        assert plan("progmarkers") == ("shell", None), \
+            "a program whose stream carries markers still reports them"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_the_shells_own_parser_is_the_general_completeness_check():
@@ -173,10 +230,39 @@ def test_marker_plan_uses_the_parser_for_open_constructs():
 def test_only_shells_that_speak_dollar_question_are_offered():
     for cmd, ok in (("bash", True), ("sh", True), ("dash", True), ("zsh", True),
                     ("env ZDOTDIR=/x zsh", True), ("env -i zsh", True),
-                    ("/bin/ksh", True),
+                    ("/bin/ksh", True), ("nice -n 5 bash", True),
+                    ("stdbuf -o 0 bash", True), ("env -u FOO bash", True),
                     ("fish", False), ("csh", False), ("tcsh", False),
                     ("python3", False), (None, False)):
         assert waiting.sentinel_possible({"cmd": cmd}) is ok, cmd
+
+
+def test_wrapper_arguments_do_not_become_the_shell():
+    assert waiting.shell_word("nice -n 5 bash") == "bash"
+    assert waiting.shell_word("nice --adjustment 5 bash") == "bash"
+    assert waiting.shell_word("stdbuf -o 0 bash") == "bash"
+    assert waiting.shell_word("stdbuf -o0 bash") == "bash"
+    assert waiting.shell_word("env -u FOO bash") == "bash"
+    assert waiting.shell_word("env FOO=bar bash") == "bash"
+    assert waiting.shell_word("env -i zsh") == "zsh"
+
+
+def test_a_negative_marker_probe_is_cached_briefly():
+    """A program pane pays the marker probe on every send; a negative result
+    must not add 1.5 s per line, and it must expire so a late remote shell is
+    discovered again."""
+    root = build("probe", ["Welcome\n"], cmd="python3")
+    try:
+        st = records.read_state("probe")
+        mode, _ = waiting.marker_plan("probe", st, "x", probe_wait_s=0.05)
+        assert mode == "skipped"
+        assert st.get("marker_probe_until", 0) > time.time(), st
+        assert waiting.marker_probe_wait(st) == 0.0
+        assert waiting.marker_probe_wait({"marker_probe_until": time.time() - 1}) == 1.5
+        assert waiting.marker_probe_wait(None) == 1.5
+        assert waiting.marker_probe_wait({}) == 1.5
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_a_line_ending_in_a_semicolon_does_not_get_a_double_one():

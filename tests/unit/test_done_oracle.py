@@ -126,8 +126,9 @@ def test_native_command_status_is_a_first_class_oracle():
 
 def test_every_oracle_has_a_via_label():
     for oracle in ("osc133", "native", "probe", "pane-exit", "quiet",
-                   "quiet-unmanaged"):
+                   "quiet-unmanaged", "no-marker"):
         assert oracle in waiting.DONE_VIA, oracle
+    assert waiting.DONE_VIA["no-marker"] == "no-marker"
     assert waiting.DONE_VIA["quiet-unmanaged"] != waiting.DONE_VIA["quiet"], \
         "an unmanaged wait must not look like a managed one"
 

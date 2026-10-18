@@ -107,7 +107,7 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
 - **A synthesized fact must name its author.** When the pane's shell emits no OSC 133 at
   all — an rc file that hands bash to a prompt wrapper (blerust and friends) clears
   `PS1`/`PROMPT_COMMAND` and reads lines itself, so no injection can survive it — `send`
-  appends `; __tu_ec=$?; printf '\e]133;C\a\e]133;D;%s\a' "$__tu_ec"` to the line it
+  appends `; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007' "$__tu_ec"` to the line it
   *submits*, and the code reaches the recording as bytes term-use wrote. Four rules keep
   that honest rather than clever: only a submitting send gets one (a half-typed line is
   never lengthened); a line whose meaning the suffix could change is refused with a reason

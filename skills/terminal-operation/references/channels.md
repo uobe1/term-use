@@ -88,7 +88,7 @@ not a list of supported shells: when the shape does not fit, anchor the work you
 | `marker: paused` | the tty belongs to a program or a previous command; your input goes through verbatim; no marker was attached | `--done`/`--cmd-done` refuse it; drive the program with its own prompts/output; `--shell-ready` after it exits; never force a marker into it |
 | `no-shell-integration` | no done marker can arrive from the shell, and this server has no native status | start a shell term-use can inject into; own a marker; `--until`; `--exit` when the program is the pane |
 | `shell-protocol-unavailable` | the foreground is not the shell `start` launched, so its markers cannot answer | `--until --since-send`, `out`, or your own marker; on tmux 3.8 the native channel may still answer markers from the far side |
-| `unmanaged-pane` | term-use has no recording of this pane | `screen`, `--until`/`--quiet-ms` (degraded), `--exit`; start your own session for facts |
+| `unmanaged-pane` | term-use has no recording of this pane — or the address resolves to a pane the records do not describe (an explicit `:win.pane`, or an action command on a bare session whose active window moved) | `screen`, `--until`/`--quiet-ms` (degraded), `--exit`; address the recorded pane, or start your own session for facts. `out`/`trace`/`replay` describe the recording and still answer a bare session |
 
 The shell and program names elsewhere in this reference are examples, not a support
 list: the condition is always the same — the fact channel cannot see a completion, so
@@ -140,6 +140,12 @@ When neither holds the wait keeps failing and the timeout evidence carries
 sending the next one, type the command with `--type` instead of bare keys, use
 `--shell-ready` to ask the shell directly, or run the pane on tmux 3.8+, where the
 native channel binds a completion to a *start time* and needs no echo binding.
+
+A sentinel send is different: its marker is term-use's own, so when the recording
+cannot supply it and the shell is known to emit OSC 133 of its own, tmux's status is
+not used — it may be the shell's later `D;0`, which reads the sentinel's printf as
+`$?`=0. That timeout carries `"degraded": "native-ambiguous"`; wait for the
+recording to catch up and run the wait again, or use `--until --since-send`.
 
 **When the shell reports nothing at all**, `send` appends a completion sentinel of its own
 (see `## send`) so the exit code still arrives as a `fact` — and the met verdict then says

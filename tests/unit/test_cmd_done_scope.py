@@ -49,7 +49,8 @@ class Ctx:
         return ""
 
 
-def build(name, events, pre=0, settled=None, baseline="absent", marker=None):
+def build(name, events, pre=0, settled=None, baseline="absent", marker=None,
+          integration=True):
     """Write a recording + state.json the way `send` leaves them.
 
     `events` is a list of ("o", text) pane-output payloads or ("i", injection)
@@ -72,7 +73,7 @@ def build(name, events, pre=0, settled=None, baseline="absent", marker=None):
     # Byte offset of the line after the first `pre` event lines.
     cut = len("\n".join(lines[:1 + pre])) + 1
     state = {"session": name, "socket": None, "cmd": "bash",
-             "shell_integration": True, "last_send_offset": cut}
+             "shell_integration": integration, "last_send_offset": cut}
     if settled is not None:
         state["last_send_settled"] = settled
     if marker is not None:
@@ -392,6 +393,81 @@ def test_a_tracked_send_waits_for_its_own_echo_even_if_the_file_looks_quiet():
         cond = CmdDone("cd12b")
         assert cond.evaluate(Ctx()) is True, "the echo heals the race"
         assert cond.degraded is None and cond.exit_code == 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_native_accepts_a_same_second_start_after_an_idle_baseline():
+    """tmux timestamps have one-second granularity. A command started after an
+    idle stamp can share its start_time with the previous command; with
+    running=0 and a known status, the new end_time is still ours."""
+    base = {"status": 0, "end_time": 40, "start_time": 40, "running": 0}
+    meta = {"pane_command_running": 0, "pane_command_status": 0,
+            "pane_command_start_time": 40, "pane_command_end_time": 41}
+    root = build("cd16", [], pre=0, settled=False, baseline=base)
+    try:
+        cond = CmdDone("cd16")
+        assert cond.evaluate(Ctx(meta)) is True
+        assert cond.exit_code == 0 and cond.via == "tmux-command-status"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_sentinel_send_reads_its_own_done_not_a_later_shell_zero():
+    """On an integrated shell, the sentinel's D;1 is followed by the shell's
+    PROMPT_COMMAND D;0 (our printf left $? at 0). tmux reports the later 0;
+    the recording's D;1 is the sentinel's own code and must win."""
+    base = {"status": 0, "end_time": 40, "start_time": 30, "running": 0}
+    meta = {"pane_command_running": 0, "pane_command_status": 0,
+            "pane_command_start_time": 60, "pane_command_end_time": 61}
+    line = "false; __tu_ec=$?"
+    root = build("cd13", [inject(line),
+                          ("o", "$ " + line + "\r\n"),
+                          ("o", C), ("o", D3 + A + B),
+                          ("o", D0)],
+                 pre=0, settled=True, baseline=base, marker="sentinel",
+                 integration=True)
+    try:
+        cond = CmdDone("cd13")
+        assert cond.evaluate(Ctx(meta)) is True, \
+            "the sentinel's own D is a fact even though tmux saw a later D"
+        assert cond.exit_code == 3 and cond.via == "osc133", \
+            (cond.exit_code, cond.via)
+        assert cond.degraded is None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_sentinel_send_with_a_blind_recorder_does_not_trust_native_when_integrated():
+    """With no recorded D, tmux's status could be the shell's later D;0; a
+    sentinel send on a known-integrated shell must degrade, not claim it."""
+    base = {"status": 0, "end_time": 40, "start_time": 30, "running": 0}
+    meta = {"pane_command_running": 0, "pane_command_status": 0,
+            "pane_command_start_time": 60, "pane_command_end_time": 61}
+    root = build("cd14", [inject("false; __tu_ec=$?")], pre=0, settled=True,
+                 baseline=base, marker="sentinel", integration=True)
+    try:
+        cond = CmdDone("cd14")
+        assert cond.evaluate(Ctx(meta)) is False, \
+            "native may be the shell's later D;0, not the sentinel's"
+        assert cond.degraded == "native-ambiguous", cond.degraded
+        assert cond.exit_code is None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_sentinel_send_without_integration_may_use_native():
+    """A shell that never had integration cannot emit a competing D; there the
+    native status is the sentinel's own marker when the recorder is blind."""
+    base = {"status": 0, "end_time": 40, "start_time": 30, "running": 0}
+    meta = {"pane_command_running": 0, "pane_command_status": 0,
+            "pane_command_start_time": 60, "pane_command_end_time": 61}
+    root = build("cd15", [inject("true; __tu_ec=$?")], pre=0, settled=True,
+                 baseline=base, marker="sentinel", integration=False)
+    try:
+        cond = CmdDone("cd15")
+        assert cond.evaluate(Ctx(meta)) is True
+        assert cond.via == "tmux-command-status" and cond.exit_code == 0
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

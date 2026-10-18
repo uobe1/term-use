@@ -30,7 +30,12 @@ mkdir -p "$TMP/tmux"
 export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
-cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
+cleanup() {
+  tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true
+  [ -n "${SOCK2:-}" ] && TMUX_TMPDIR="${TMPD2:-$TMUX_TMPDIR}" \
+    tmux -L "$SOCK2" kill-server >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 fail() { echo "E2E-33 FAIL: $*"; exit 1; }
 
@@ -199,5 +204,35 @@ assert r['marker'] == 'sentinel', f'tracking must resume once the marker arrives
 " || fail "tracking never resumed after the program left (see above)"
 $TD wait -n "$NAME" --until 'TU_AFTER' --timeout 10 >/dev/null \
   || fail "the line after the program never ran"
+
+# --- 8. an injected bash whose user rc takes the read loop -----------------
+# `start --cmd bash` injects the hooks, but sourcing this HOME's .bashrc blocks
+# inside the wrapper loop before the hooks are installed. That is the device
+# shape: the launch-time flag says "shell", the stream has no marker, and the
+# sentinel is the only fact channel.
+mkdir -p "$TMP/injhome"
+cp "$ROOT/tests/fixtures/clobbering.bashrc" "$TMP/injhome/.bashrc"
+SOCK2="${SOCK}i"; TMPD2="$TMP/tmuxi"; mkdir -p "$TMPD2"
+env HOME="$TMP/injhome" TMUX_TMPDIR="$TMPD2" $TD start -n td33inj --cmd bash \
+  --socket "$SOCK2" --width 90 --height 25 >/dev/null \
+  || fail "start (injected clobber) failed"
+OUT="$(env TMUX_TMPDIR="$TMPD2" $TD send -n td33inj --socket "$SOCK2" \
+  --type "echo TU_INJECTED" --key Enter)" || fail "send (injected clobber)"
+printf '%s\n' "$OUT" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+assert r.get('marker') == 'sentinel', r
+assert '__tu_ec' in r['sent']['text'], r
+" || fail "an injected shell with a dead prompt must be narrated (see above)"
+env TMUX_TMPDIR="$TMPD2" $TD wait -n td33inj --socket "$SOCK2" --done \
+  --timeout 15 >"$TMP/inj-done.json" || fail "--done (injected clobber)"
+python3 -c "
+import json
+v = json.load(open('$TMP/inj-done.json'))
+assert v['verdict'] == 'met' and v['confidence'] == 'fact', v
+assert v.get('exit_code') == 0, v
+" || fail "the injected clobbered shell did not answer a fact (see above)"
+env TMUX_TMPDIR="$TMPD2" $TD stop -n td33inj --socket "$SOCK2" >/dev/null
+TMUX_TMPDIR="$TMPD2" tmux -L "$SOCK2" kill-server >/dev/null 2>&1 || true
 
 echo "E2E-33 ok"
