@@ -115,9 +115,9 @@ class Face:
                                sub + 16 + 6 * seg))
             self._unknown = False
         else:
-            # 0/2/6/8/10: rare today. Trust the font rather than claim coverage
-            # we have not read.
-            self._unknown = True
+            # 0/2/6/8/10: rare today. One unreadable subtable must not erase the
+            # coverage a readable one already proved; coverage is their union.
+            pass
 
     # -- queries -----------------------------------------------------------
     def covers(self, ch: str) -> bool | None:

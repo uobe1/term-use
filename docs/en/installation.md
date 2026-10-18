@@ -24,7 +24,7 @@ ways to do it — pick whichever fits.
 | Component | Version | Why |
 |---|---|---|
 | Python | **3.14+** | the development and E2E baseline; `requires-python` in `pyproject.toml` enforces it |
-| tmux | **3.2a – 3.8+** | the service side. The E2E suite runs on **both 3.7c and 3.8**; 3.8+ is recommended — see the version notes below |
+| tmux | **3.8+** | the service side. This is the version term-use is written and tested against; see [Getting tmux 3.8](#getting-tmux-38) |
 | Pillow | any current release | optional. Only `screenshot` needs it; every other command is Pillow-free |
 
 Check what you have:
@@ -34,22 +34,58 @@ python3 --version
 tmux -V
 ```
 
-No tmux? Install it with the system package manager first (`apt install tmux` on
-Debian/Ubuntu, `brew install tmux` on macOS, `pkg install tmux` on Termux/Android,
-`dnf install tmux` on Fedora). GNU screen is not a substitute — term-use drives panes
-through tmux's own interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
+No tmux, or a `tmux -V` below 3.8? Follow [Getting tmux 3.8](#getting-tmux-38)
+below. GNU screen is not a substitute — term-use drives panes through tmux's own
+interfaces (`pipe-pane`, `capture-pane -e`, `send-keys`).
 
-**What changes across tmux versions** (measured, not assumed):
-
-| Your tmux | What that means here |
-|---|---|
-| 3.2a – 3.7c | fully supported. `--cmd-done`/`--shell-ready` get their facts from term-use's own recording, not from tmux, so a stopped recorder or a prompt framework that rewrites `PROMPT_COMMAND` costs the fact channel |
-| 3.7 / 3.7a / 3.7b / 3.7c | no difference that matters — the OSC 133 handling and `capture-pane -F` flags are identical across the patch line |
-| 3.8 or newer | **recommended.** tmux parses the markers itself, so `wait --done` has a second fact source (`via: tmux-command-status`) that survives ssh, a clobbered `PROMPT_COMMAND` and a dead recorder, and `screen --meta` answers "is a command running?" as a fact (`pane_command_running`). Everything else is the same |
-| older than 3.2 | unsupported: `capture-pane -e` attribute fidelity and `send-keys -H` byte handling are not reliable there |
+**Why 3.8 is the floor, not a preference**: tmux 3.8 parses OSC 133 command
+markers itself and publishes them on the pane (`pane_command_running`,
+`pane_command_status`, `pane_command_start_time`/`end_time`). That is a second
+fact server, and the one that binds a completion to a *start time* rather than to
+a byte position — so it survives ssh, a prompt framework that rewrites
+`PROMPT_COMMAND`, and a recorder that stopped draining. Below 3.8 term-use has
+only its own recording to reason from, and several answers degrade to lower
+confidence. **Servers older than 3.8 are deprecated**: they still run, on that
+fallback and reporting `degraded` when it cannot prove something, and support
+ends at the next minor release.
 
 term-use has **zero Python dependencies**. tmux is an external binary, not a
 pip package.
+
+### Getting tmux 3.8
+
+`tmux -V` must answer **3.8 or newer**. Some package managers are behind that, so
+check before assuming a distro package is enough:
+
+| Platform | How to get 3.8 |
+|---|---|
+| Termux / Android | `pkg update && pkg install tmux` — the Termux repository carries 3.8 |
+| macOS | `brew install tmux`, then `tmux -V`. If Homebrew's build is behind 3.8, build from source (below) |
+| Debian / Ubuntu / Fedora | the archived release is usually 3.3–3.5. Install the build deps and compile the source (below) — this is the normal route, not an exotic one |
+| Any other Linux | `tmux -V` from your package manager first; if it is below 3.8, compile |
+
+Building from source (works everywhere, ~1 minute):
+
+```bash
+sudo apt install -y build-essential pkg-config libevent-dev libncurses-dev   # Fedora: ncurses-devel libevent-devel
+git clone https://github.com/tmux/tmux.git && cd tmux
+git checkout 3.8
+sh autogen.sh && ./configure --prefix=/usr/local && make -j4 && sudo make install
+```
+
+Without root, point the prefix somewhere on your `PATH` instead:
+`./configure --prefix="$HOME/.local" && make install`, then use
+`$HOME/.local/bin/tmux`.
+
+Two things that bite after an upgrade:
+
+- **A server already running is still the old one.** tmux refuses a newer client
+  against an older server, so either `tmux kill-server` (you lose those panes) or
+  keep working on your own `--socket NAME`, which starts a fresh server from the
+  new binary.
+- **`tmux -V` reports the client, not the server.** term-use asks the *server* it
+  talks to, and that is the version whose features exist. If in doubt:
+  `tmux -V` inside the same environment term-use runs in.
 
 ---
 
@@ -124,12 +160,13 @@ uv tool install git+https://github.com/uobe1/term-use.git
 uv tool install git+https://github.com/uobe1/term-use.git --with pillow
 ```
 
-The 2.0 line is developed on its own alpha branches and `main` still carries the older
-`term-debug` layout, so if you need 2.0 before it merges, install from a clone checked
-out at the branch you want — do not bake a ref into the command above:
+The 2.0 line ships from `main`. New work lands on the alpha branches (`v2.0aN`)
+and is merged into `main` once verified, so the commands above install the current
+release — do not bake a ref into them. Clone a branch only when you need something
+not yet merged:
 
 ```bash
-git clone https://github.com/uobe1/term-use.git && cd term-use
+git clone -b v2.0a7 https://github.com/uobe1/term-use.git && cd term-use
 uv tool install . --with pillow        # or `uv tool install -e .` to hack on it
 ```
 
@@ -257,19 +294,14 @@ code came from the shell protocol (OSC 133), not from screen guessing.
 
 ---
 
-### Migrating from the old shim layout
+### Where recordings live
 
-Early v2 checkouts exposed a root-level `term_debug.py` shim. It has been removed;
-the package now lives in `src/termuse/` and runs as `python -m termuse`. If your
-scripts still call `python3 term_debug.py`, replace the call with `term-use`
-(installed) or `PYTHONPATH=<repo>/src python3 -m termuse` (source tree).
-
-Session data has also moved: it used to live under
-`$XDG_CACHE_HOME/term-use/` (i.e. `~/.cache/term-use/`) and now lives under
-`$XDG_STATE_HOME/term-use/` (i.e. `~/.local/state/term-use/`) — per the XDG
-Base Directory spec, recordings and locator state are *logs / current state*, not
-discardable cache. Existing recordings are not migrated or read from the old
-location; copy the directory over manually if you need them.
+Each session's evidence and locator state are plain files under
+`$XDG_STATE_HOME/term-use/<session>/` (`~/.local/state/term-use/` by default):
+`raw.log` (the recorded stream) and `state.json` (socket, pane, shell integration,
+last-send offset). Per the XDG Base Directory spec these are *logs / current state*,
+not discardable cache. Keep `XDG_STATE_HOME` the same for `start` and every later
+command, or the session looks empty.
 
 ## Updating
 
@@ -279,14 +311,14 @@ uv tool upgrade term-use
 python3 -m pip install -U git+https://github.com/uobe1/term-use.git
 ```
 
-To pin a version while the 2.0.0 alpha line is moving, append a git ref to the
-URL — `@<tag>` or `@<commit>`:
+To pin a version while the 2.0 line is moving, append a git ref to the URL —
+`@<tag>` or `@<commit>`:
 
 ```bash
 uv tool install git+https://github.com/uobe1/term-use.git@<commit>
 ```
 
-(No tags have been cut yet; pin a commit if you need stability.)
+Pin a commit if you need stability.
 
 If you installed the skill by symlink from a clone, re-run `git pull` in the clone to
 refresh it. If you copied it, re-copy from a fresh clone — and if you installed the
@@ -335,8 +367,29 @@ explicit.
 
 ### `{"error":{"code":"no-shell-integration",...}}` from `--cmd-done`
 
-Normal for non-bash sessions: the OSC 133 markers are injected into bash only. Wait
-with `--until` anchored on the program's own output marker instead.
+The pane's shell emits no OSC 133 command markers. Integration is injected for
+**both bash and zsh** (`start` builds a `ZDOTDIR` of its own that sources your files
+first), **fish >= 4.0** emits the markers by itself, and a session carrying someone
+else's integration (VSCode's OSC 633, WezTerm's 133) is believed from the stream
+rather than refused for not being a shell we configured. So this error means one of:
+
+- the pane runs a shell with no pre-exec hook — plain `sh`/`dash`/`csh`. Wait on the
+  program's own output with `--until 'regex' --since-send`, or on pane death with
+  `--exit` when the program *is* the pane;
+- a prompt framework (starship, powerline) rewrote the injected hooks after startup.
+  `--until` still works, and term-use also asks tmux's own command
+  status, which keeps answering when `PROMPT_COMMAND` is gone;
+- the shell had not painted its first prompt while the gate looked. It waits up to
+  `min(--timeout, 5s)` for the stream to prove itself, so a longer `--timeout` is
+  the fix, not a different shell.
+
+`--cmd zsh` and `--cmd fish` are supported routes to a fact-level wait; only
+`sh`/`dash` have no completion marker to wait for — and even there `send` appends a
+completion sentinel of its own to the line it submits, so `wait --done` still answers
+at `fact` with the exit code. The send result states which happened
+(`marker: shell | sentinel | skipped`) and a met verdict says in its `note` when the
+marker was synthesized rather than confessed by the shell. Set `TERM_USE_SENTINEL=0`
+to forbid that append: the refusal comes back, honestly.
 
 ### `{"error":{"code":"shell-not-ready",...}}` from `--shell-ready`
 

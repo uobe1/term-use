@@ -7,6 +7,8 @@ export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 TD="python3 -m termuse"
 SOCK="td12sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
@@ -37,7 +39,7 @@ PY
 
 # --- human projection: summary lines ---
 $TD trace -n td12 > "$TMP/human.txt" || fail "trace human failed"
-grep -q "i .*type='echo T12'" "$TMP/human.txt" || fail "human trace lacks i summary"
+grep -q "i .*type='echo T12" "$TMP/human.txt" || fail "human trace lacks i summary"
 grep -q "o " "$TMP/human.txt" || fail "human trace lacks o summary"
 grep -q "m wait-met" "$TMP/human.txt" || fail "human trace lacks m summary"
 

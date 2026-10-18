@@ -99,6 +99,74 @@ if g["missing"]:
     print(f"unresolvable on this box: {samples}")
 PY
 
+# --- CJK through the fallback chain, and arrows as geometry (issue #3) -------
+# The reporter's device had no CJK/arrow coverage in its primary face at all;
+# this box had a different failure: seven `unifont*` files filled the four
+# fallback slots, so the real CJK face further down the listing was never opened
+# and the picture came out as an 8x16 bitmap. Both shapes are pinned here — the
+# chain must be chosen by *coverage*, and a proper face must beat the bitmap when
+# the machine has one.
+#
+# The arrows go on their own line: a CJK glyph owns two columns, so cells after
+# it on the same row would shift, and a pixel assertion would be testing the
+# layout instead of the glyph.
+cat > "$TMP/paint_cjk.sh" <<'SH'
+#!/bin/bash
+printf '\e[38;2;0;255;0m← →\e[0m\n你好世界\n'
+sleep 120
+SH
+chmod +x "$TMP/paint_cjk.sh"
+$TD start -n td22cjk --socket "$SOCK" --width 60 --height 10 \
+  --cmd "bash $TMP/paint_cjk.sh" >/dev/null || fail "start (cjk) failed"
+$TD wait -n td22cjk --until '你好世界' --timeout 10 >/dev/null || fail "cjk target never painted"
+$TD screenshot -n td22cjk -o "$TMP/cjk.png" >"$TMP/cjk.json" \
+  || fail "screenshot (cjk) failed"
+
+python3 - "$TMP/cjk.json" "$TMP/cjk.png" <<'PY' || fail "CJK/arrow fidelity (see above)"
+import json, os, sys
+from PIL import Image
+from termuse import screenshot
+r = json.load(open(sys.argv[1]))
+g = r["glyphs"]
+im = Image.open(sys.argv[2]).convert("RGB")
+cw, lh = r["charw"], r["lineh"]
+GREEN, BG = (0, 255, 0), (0, 0, 0)
+
+def px(x, y):
+    return im.getpixel((x, y))[:3]
+
+assert g["vector"] >= 2, f"the arrow range must be drawn, not hoped for: {g}"
+# row 0: ← in cell 0, → in cell 2 (cell 1 is the space between them)
+mid = lh // 2
+for cell, head_left in ((0, True), (2, False)):
+    x0 = cell * cw
+    shaft = [px(x0 + i, mid) for i in range(1, cw - 1, max(1, cw // 6))]
+    assert any(p == GREEN for p in shaft), f"arrow in cell {cell} has no shaft: {shaft}"
+    edge = px(x0 + 1 if head_left else x0 + cw - 2, mid)
+    assert edge == GREEN, f"arrow head of cell {cell} not at the edge: {edge}"
+    opposite = [px(x0 + i, y) for i in (1, cw - 2) for y in (2, lh - 3)]
+    assert all(p == BG for p in opposite), \
+        f"cell {cell} has ink where a horizontal arrow cannot reach: {opposite}"
+# row 1: CJK must have ink in the *second* row, from a real face, not a box
+cjk_row = [px(x, lh + mid) for x in range(0, 5 * cw, max(1, cw // 3))]
+assert any(p != BG for p in cjk_row), f"CJK cells came out blank: {set(cjk_row)}"
+
+chosen = [os.path.basename(f).lower() for f in g.get("fallback_fonts", [])]
+cjk_hints = ("wqy", "zenhei", "noto", "cjk", "droid", "source-han", "ipa",
+             "wenquanyi")
+installed = any(h in os.path.basename(p).lower()
+                for p in screenshot._candidate_paths(screenshot.font_dirs())
+                for h in cjk_hints)
+if installed:
+    assert chosen and not all("unifont" in f for f in chosen), \
+        f"a real CJK face exists and the chain still picked the bitmap: {chosen}"
+    assert g["missing"] == 0, f"this box can draw CJK and reported tofu: {g}"
+else:
+    assert g["missing"] >= 4, \
+        f"no CJK face here, so the honest answer is a reported gap: {g}"
+print(f"cjk chain: {chosen}  glyphs={ {k: g[k] for k in ('vector','primary','fallback','missing')} }")
+PY
+
 # --- the file that was written matches what the JSON claims -----------------
 python3 - "$TMP/g.json" "$TMP/g.png" <<'PY' || fail "reported size/path must match the file"
 import json, os, sys

@@ -68,7 +68,7 @@ def test_require_returns_stdout_on_success():
 
 
 def test_signal_name_normalizes_across_tmux_builds():
-    # Measured: "9" on tmux 3.7c/Linux, "KILL" on the Termux device.
+    # Some builds answer a bare number ("9"), others a name ("KILL").
     assert tmuxio.signal_name("9") == "KILL"
     assert tmuxio.signal_name("KILL") == "KILL"
     assert tmuxio.signal_name("TERM") == "TERM"

@@ -8,6 +8,8 @@ The composite verdict takes the *weakest* confidence of its conditions.
 Timeout never kills the target; it returns an evidence snapshot.
 """
 import re
+import shlex
+import subprocess
 import time
 
 from termuse import osc133, records
@@ -19,6 +21,62 @@ CONFIDENCE_ORDER = ("fact", "inference", "heuristic")  # strong -> weak
 # What `wait --done` settles on when the target supports no stronger oracle.
 DEFAULT_DONE_QUIET_MS = 700
 
+# OSC sequences that can change what the grid shows. Everything else an OSC can
+# carry — window/icon name (0/1/2), cwd (7), clipboard (52), the 133/633 command
+# markers, desktop notifications (9/99/777) — paints zero cells. Counting those
+# as output activity made `--quiet-ms` never settle for a program that animates
+# only its title bar: an ink TUI burned a full 240 s timeout on `⠏ 将 note.txt…`
+# frames while its screen stayed byte-identical.
+PAINTING_OSC = frozenset({4, 10, 11, 12, 104, 110, 111, 112, 118, 119})
+
+
+def _osc_end(text: str, i: int) -> int | None:
+    """Index just past the OSC sequence at `text[i:] == ESC ]`, or None if it
+    has not arrived in full yet. A bare ESC (no `\\`) abandons the sequence."""
+    m = i + 2
+    while m < len(text):
+        c = text[m]
+        if c == "\x07":
+            return m + 1
+        if c == "\x1b":
+            return m + 2 if text.startswith("\x1b\\", m) else m
+        m += 1
+    return None
+
+
+def cell_visible(text: str, carry: str = "") -> tuple[str, str]:
+    """Split pane bytes into (what can reach the grid, an OSC still arriving).
+
+    `carry` is the open tail of an OSC sequence from the previous chunk, so a
+    title split across two o-events is still recognized as a title rather than
+    counted as paint because its terminator has not landed yet.
+    """
+    buf = carry + text
+    kept: list[str] = []
+    if len(carry) > 65536:
+        # An OSC that never terminated stopped being a sequence a long time ago.
+        # Hand the bytes back as visible instead of re-scanning a buffer that
+        # grows once per event — the same reason `echo_barrier` windows its tail.
+        kept.append(carry)
+        buf = text
+    i = 0
+    while True:
+        j = buf.find("\x1b]", i)
+        if j < 0:
+            kept.append(buf[i:])
+            return "".join(kept), ""
+        kept.append(buf[i:j])
+        end = _osc_end(buf, j)
+        if end is None:
+            return "".join(kept), buf[j:]
+        payload = buf[j + 2:end]
+        if payload.endswith("\x1b\\"):
+            payload = payload[:-2]
+        code = payload.split(";", 1)[0]
+        if code.isdigit() and int(code) in PAINTING_OSC:
+            kept.append(buf[j:end])       # this one repaints: it is activity
+        i = end
+
 
 class Condition:
     label: str = "condition"
@@ -27,6 +85,11 @@ class Condition:
     # (e.g. "unmanaged" — no state.json/raw.log, so part of the machinery
     # cannot run). None on fully-equipped waits.
     degraded: str | None = None
+    # What this condition itself answered on its last evaluation. The
+    # composite's verdict is a different number: an AllOf that timed out
+    # because `--until` never matched still has to be able to show that the
+    # cmd-done member DID match (and with which exit code).
+    last_met: bool | None = None
 
     def evaluate(self, ctx) -> bool:
         raise NotImplementedError
@@ -153,27 +216,85 @@ class AllOf(Condition):
         self.confidence = CONFIDENCE_ORDER[weakest]
 
     def evaluate(self, ctx) -> bool:
-        result = all(c.evaluate(ctx) for c in self.conditions)
+        ok = True
+        for c in self.conditions:
+            met = c.evaluate(ctx)
+            c.last_met = met
+            if not met:
+                ok = False
+                break
         self._recompute()
-        return result
+        return ok
 
     def to_json(self, met: bool) -> dict:
+        # Members report what THEY answered, not the composite's verdict: the
+        # timeout evidence that hides a matched child (and blanks its exit code)
+        # is the reason an agent cannot tell which half of an AND is lying.
         return {**super().to_json(met),
-                "conditions": [c.to_json(met) for c in self.conditions]}
+                "conditions": [c.to_json(met if c.last_met is None
+                                         else c.last_met)
+                               for c in self.conditions]}
+
+
+def _squeeze(text: str) -> str:
+    """Drop whitespace entirely — the shape the echo comparison needs.
+
+    A prompt wrapper redraws a long line with a hard break wherever the cursor
+    happens to sit, which can fall *inside a token*: the device echoed
+    `printf '\\0`↵`33]133;C…'`, and no amount of collapsing turns that back into
+    `printf '\033...`. Matching on the whitespace-free text is what survives it;
+    the probe is a whole command line, so a cross-token accident is not a live
+    risk, while a missed barrier silently costs the caller its fact channel.
+    """
+    return "".join(str(text).split())
+
+
+def echo_barrier(session: str, offset: int, text: str) -> tuple[int, int] | None:
+    """Position of the first event at/after `offset` that carries our echo.
+
+    The answer is `(file position, offset inside that event)`. The second number
+    matters when the recorder was frozen: all the lagged bytes (a previous
+    command's C/D and our echo) arrive as one o-event, so the file position alone
+    cannot order them. `(pos, 0)` is the conservative fallback when the echo is
+    split by escapes or chunks and can only be seen in the concatenated window.
+
+    tmux serializes a pane's output stream, and the tty echoes injected input
+    into that same stream at injection time. Returns None while the echo has not
+    reached the recording yet — the caller polls.
+    """
+    probe = _squeeze(text)
+    if len(probe) < 3:
+        return None
+    raw_probe = re.compile(r"\s*".join(re.escape(ch) for ch in probe))
+    window = ""
+    for _ts, code, data, pos in records.events_since(session, offset):
+        if code != "o" or not isinstance(data, str):
+            continue
+        match = raw_probe.search(data)
+        if match:
+            return pos, match.start()
+        window = (window + data)[-32768:]
+        if probe in _squeeze(screen_mod.visible_text(window)):
+            return pos, 0          # split by an escape/chunk: event-level order
+    return None
 
 
 class CmdDone(Condition):
     """OSC 133 D marker after a C, scanned from raw.log since the last send.
 
     fact confidence: the exit code comes from the terminal protocol, not from
-    screen text. Expect-code mismatch fails immediately (never waits out the
-    timeout). Requires shell integration recorded in state.json.
+    screen text. A marker answers only *if this send caused it* — see
+    `_barrier` — and an expected-code mismatch fails immediately (never waits out
+    the timeout). Requires shell integration recorded in state.json.
 
     On tmux 3.8+ there is a second fact source for the same event: tmux parses
     the markers itself and answers `pane_command_status`/`_running`, which
     `--cmd-done` consults first because one display-message beats replaying the
-    recording. It also answers where the scan cannot: markers forwarded through
+    recording, and because it binds a completion to a *start time* instead of to
+    a file position. It also answers where the scan cannot: markers forwarded through
     ssh, or emitted by a shell whose startup files took PROMPT_COMMAND back.
+    That channel is the supported one; the byte scan is what a ≤3.7c server is
+    left with, and it is why `--done` sometimes has to degrade.
     """
     label = "cmd-done"
     confidence = "fact"
@@ -188,6 +309,40 @@ class CmdDone(Condition):
     def _stream(self) -> str:
         state = records.read_state(self.session)
         return records.stream_since(self.session, state.get("last_send_offset", 0))
+
+    def _barrier(self, state: dict, offset: int) -> tuple[int, int] | None:
+        """The position a `C` must clear to be this send's, or None if unprovable.
+
+        Two bindings, in order of how much they prove:
+
+        1. the echo of what we typed (see `echo_barrier`) — tmux serializes the
+           pane's output stream, so the previous command's bytes are ordered
+           before our echo however late the recorder delivered them. This is what
+           survives a recorder that is not merely behind but stopped outright: a
+           frozen recorder writes nothing, so "the file stopped growing" proves
+           nothing at all;
+        2. `send` measured that the recording was quiet — the fallback for a
+           keys-only send, which has nothing to echo. It is a heuristic, not a
+           proof: a pane whose recorder is paused looks identical to an idle one.
+           It is refused outright once this send is the kind we narrate
+           (`marker_source: "sentinel"`), because then the missing echo is
+           usually the same lag still in flight: a frozen recorder makes the
+           file look quiet while the *previous* line's sentinel answers for a
+           command that had not started.
+
+        Neither holds means the window contains markers belonging to an unknown
+        command. Then a `fact` would be a guess about someone else's exit code.
+        The caller polls, so a missing echo heals once the echo lands.
+        """
+        typed = records.last_sent_text(self.session, offset)
+        if typed:
+            pos = echo_barrier(self.session, offset, typed)
+            if pos is not None:
+                return pos
+        if (state.get("last_send_settled")
+                and state.get("marker_source") != "sentinel"):
+            return offset, 0
+        return None
 
     def _mismatch(self, code: int, ctx) -> None:
         raise osc133.mismatch_error(
@@ -222,65 +377,105 @@ class CmdDone(Condition):
         base = state.get("native_baseline") or {}
         start, base_start = m.get("pane_command_start_time"), base.get("start_time")
         if base_start is not None and start is not None and start <= base_start:
-            # tmux is still reporting the command that was running when we
-            # stamped: it started no later than that one, so it cannot be ours.
-            # Same class as the byte channel's lag race, and the byte scan below
-            # is the precise answer when this one cannot give it.
-            return None
+            # A baseline taken while a command was in flight can hand back that
+            # command's completion. An idle baseline is different: successive
+            # fast commands can share tmux's one-second start_time, and
+            # rejecting that case made a blind recorder time out on a command
+            # tmux had already answered.
+            if base.get("running") or base.get("status") is None:
+                return None
         if (m.get("pane_command_end_time") or 0) > (base.get("end_time") or 0):
             return code
         if base.get("status") is None or self._saw_running or code != base.get("status"):
             return code
         return None
 
+    def _native_result(self, ctx, state: dict) -> bool | None:
+        """Accept tmux's answer, or None when it has none to give."""
+        ncode = self._native(ctx, state)
+        if ncode is None:
+            return None
+        self.exit_code = ncode
+        self.via = "tmux-command-status"
+        if self.expect_code is not None and ncode != self.expect_code:
+            self._mismatch(ncode, ctx)
+        return True
+
+    def _native_fallback(self, ctx, state: dict, saw_done: bool) -> bool:
+        """What a sentinel send may answer when the recording cannot.
+
+        On a shell known to be integrated, tmux's status can be the shell's own
+        PROMPT_COMMAND D;0 — it reads the sentinel's printf as `$?`=0 — so it is
+        no evidence about the sentinel's code. Without integration there is no
+        competing D, and native is the sentinel's own marker.
+        """
+        if state.get("shell_integration"):
+            self.degraded = ("unattributed-marker" if saw_done
+                             else "native-ambiguous")
+            return False
+        return bool(self._native_result(ctx, state))
+
     def evaluate(self, ctx) -> bool:
         """Replay the full o-stream through the state machine, then accept
-        the newest done/aborted event only if it was emitted after the last
-        send (byte position >= last_send_offset). Full replay keeps C-marker
-        continuity: the C of a long-running command may sit far behind the
-        scan start."""
+        the newest done/aborted event only if this send can be shown to have
+        caused it. Full replay keeps C-marker continuity: the C of a long-running
+        command may sit far behind the scan start."""
         state = records.read_state(self.session)
-        ncode = self._native(ctx, state)
-        if ncode is not None:
-            self.exit_code = ncode
-            self.via = "tmux-command-status"
-            if self.expect_code is not None and ncode != self.expect_code:
-                self._mismatch(ncode, ctx)
-            return True
+        self.degraded = None
+        if state.get("marker_source") in NO_MARKER_SOURCES:
+            # The last send had no marker (paused/skipped/none). A D after it
+            # belongs to an earlier line; returning that code as this send's
+            # completion is the borrowed-marker bug on a clobbered shell.
+            self.degraded = "no-marker"
+            return False
+        sentinel_send = state.get("marker_source") == "sentinel"
+        if not sentinel_send:
+            accepted = self._native_result(ctx, state)
+            if accepted is not None:
+                return accepted
         offset = state.get("last_send_offset", 0)
         sc = osc133.OSC133Scanner()
-        last_done = None    # (code, byte_pos, c_pos) — a D preceded by a C
-        last_abort = None   # byte_pos of a stray D with no C
-        c_pos = None        # byte position of the C that opened the current run
+        # Positions are (event file position, offset inside that event): a
+        # frozen recorder can deliver the previous command's C/D and our echo
+        # as one o-event, where the file position alone cannot order them.
+        last_done = None    # (code, d_pos, c_pos) — a D preceded by a C
+        last_abort = None   # position of a stray D with no C
+        c_pos = None        # position of the C that opened the current run
         for _ts, code, data, pos in records.events_since(self.session, 0):
             if code != "o" or not isinstance(data, str):
                 continue
             for ev in sc.feed(data):
                 kind = ev["kind"]
+                here = (pos, int(ev.get("offset", 0)))
                 if kind == "preexec":
-                    c_pos = pos
+                    c_pos = here
                 elif kind in ("prompt", "cmdline"):
                     c_pos = None        # mirrors the scanner's own reset
                 elif kind == "done":
-                    last_done = (ev.get("code"), pos, c_pos)
+                    last_done = (ev.get("code"), here, c_pos)
                 elif kind == "aborted":
-                    last_abort = pos
+                    last_abort = here
                     c_pos = None
         # A done is never masked by a later stray marker: shells emit more than
         # one D per prompt (an integration hook plus the user's own), and the
         # trailing one carries no command.
-        #
-        # The C must sit in this send's window too. `send` takes its offset from
-        # the recording's size, and the recorder lags the pane: send while the
-        # previous command is still running (or while the box is loaded) and its
-        # C *and* D both land after that offset, so a position test on the D
-        # alone answers for the wrong command — measured on a loaded machine,
-        # where `--done` reported a met `fact` two seconds into a 12-second
-        # sleep. Requiring the authorizing C to arrive after the offset excludes
-        # markers opened before this send and keeps every legitimate case: a
-        # command always starts after the bytes that asked for it.
-        if last_done is None or last_done[1] < offset or last_done[2] is None \
-                or last_done[2] < offset:
+        if last_done is None or last_done[1][0] < offset \
+                or last_done[2] is None or last_done[2][0] < offset:
+            if sentinel_send:
+                return self._native_fallback(ctx, state, saw_done=False)
+            return False
+        # Position inside the window is necessary and not sufficient. `send`
+        # takes its offset from the recording's size, and the recorder lags the
+        # pane: send while the shell is busy (or while the box is loaded) and the
+        # previous command's C *and* D both land after that offset, so `--done`
+        # can report a met `fact` before the command even starts. The C has to
+        # clear a barrier this send caused: a drained recording, or the echo of
+        # the text we typed (see `_barrier`).
+        barrier = self._barrier(state, offset)
+        if barrier is None or last_done[2] < barrier:
+            if sentinel_send:
+                return self._native_fallback(ctx, state, saw_done=True)
+            self.degraded = "unattributed-marker"
             return False
         code_ = last_done[0]
         del last_abort  # informative only; completion is already proven
@@ -346,16 +541,23 @@ def shell_owns_the_pane(cmd: str | None) -> bool:
     whether a command finished. `bash script.sh` and `sh -c '...'` are the
     program itself: they exit when the work does, so pane death IS the fact.
     """
-    words = str(cmd or "").split()
-    if not words:
+    try:
+        words = shlex.split(str(cmd or ""))
+    except ValueError:
+        words = str(cmd or "").split()
+    base = shell_word(cmd)
+    if not base or not any(base == s or base.startswith(s + "-")
+                           for s in SHELL_COMMANDS):
         return False
-    base = words[0].rsplit("/", 1)[-1]
-    if not any(base == s or base.startswith(s + "-") for s in SHELL_COMMANDS):
+    try:
+        at = next(i for i, w in enumerate(words)
+                  if w.rsplit("/", 1)[-1] == base)
+    except StopIteration:
         return False
-    if "-c" in words or "-ic" in words or any(w.startswith("-c") and len(w) > 2
-                                              for w in words[1:]):
+    rest = words[at + 1:]
+    if "-c" in rest or "-ic" in rest or any(w.startswith("-c") and len(w) > 2
+                                            for w in rest):
         return False  # ran a command string, then exits
-    rest = words[1:]
     i = 0
     while i < len(rest):
         w = rest[i]
@@ -385,28 +587,412 @@ def program_is_pane(cmd: str | None) -> bool:
     return not shell_owns_the_pane(cmd)
 
 
-def choose_done_oracle(state: dict | None) -> str:
+# Shells whose `; var=$?; printf` spelling our sentinel can rely on. fish (`$status`),
+# csh/tcsh (`$status`, no `$?`) and anything else are excluded on purpose: appending
+# text they would mis-parse is worse than having no completion marker at all.
+SENTINEL_SHELLS = ("bash", "sh", "dash", "ksh", "zsh", "mksh", "pdksh", "ash",
+                   "busybox", "posh", "lksh")
+
+# The completion sentinel, appended to the line `send` types when the pane's shell
+# emits no OSC 133 of its own — the blerust/starship-takeover class, where the rc
+# file owns the prompt (or the read loop outright) and no injection can survive it.
+# `;` not `&&`: a command that fails is exactly the one whose code matters. Octal
+# `\033`/`\007` because that is the spelling every POSIX printf understands (bash's
+# `\e` is not portable to dash). `__tu_ec` is read first so nothing can clobber
+# `$?` before we do, and C precedes D because a `D` with no `C` reads as aborted.
+SENTINEL = ('; __tu_ec=$?; printf \'\\033]133;C\\007\\033]133;D;%s\\007\' '
+            '"$__tu_ec"')
+
+# Sends that carried no completion marker of their own. A marker found after
+# one of these can only belong to an earlier command.
+NO_MARKER_SOURCES = ("paused", "skipped", "none")
+
+
+# Wrappers that stand between `start`'s rewritten command and the shell. The
+# value tuple lists flags that consume the *next* word, so `nice -n 5 bash`
+# yields bash instead of "5"; an unknown wrapper with operands is still
+# returned as-is (a wrong shell name only costs a sentinel, never correctness).
+_WRAPPER_ARG_FLAGS = {
+    "env": ("-u", "--unset", "-C", "--chdir"),
+    "command": (),
+    "exec": ("-a", "--argv0"),
+    "time": ("-f", "--format"),
+    "nohup": (),
+    "nice": ("-n", "--adjustment"),
+    "stdbuf": ("-i", "-o", "-e", "--input", "--output", "--error"),
+}
+
+
+def shell_word(cmd: str | None) -> str:
+    """The shell a pane's command line actually execs, past wrappers and VAR=val.
+
+    `start` rewrites zsh into `env ZDOTDIR=… zsh` and bash into
+    `bash --rcfile … -i`, so the first word is often not the shell.
+    """
+    try:
+        words = shlex.split(str(cmd or ""))
+    except ValueError:
+        words = str(cmd or "").split()
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if "=" in w and not w.startswith("-"):
+            i += 1                       # VAR=value prefix
+            continue
+        base = w.rsplit("/", 1)[-1]
+        if base in _WRAPPER_ARG_FLAGS:
+            takes = _WRAPPER_ARG_FLAGS[base]
+            i += 1
+            while i < len(words):
+                flag = words[i]
+                if flag in takes:
+                    i += 2               # the flag and its value
+                    continue
+                if flag.startswith("-"):
+                    i += 1
+                    continue
+                break
+            continue
+        if w.startswith("-"):
+            i += 1                       # a wrapper's own flag, not the shell
+            continue
+        return base
+    return ""
+
+
+def sentinel_possible(state: dict | None) -> bool:
+    """Is this pane's shell one our sentinel is safe and worth appending to?"""
+    return shell_word((state or {}).get("cmd")) in SENTINEL_SHELLS
+
+
+def sentinel_refusal(text: str) -> str | None:
+    """Why the sentinel cannot follow this line, or None when it can.
+
+    The suffix is *typed*, so it must not change what runs. An incomplete command
+    (a dangling pipe or operator, an open block, a heredoc, a continuation
+    backslash, an unbalanced quote) would take our text as its own continuation —
+    `if x; then` plus our marker runs the printf as the then-branch — and a
+    trailing comment would swallow the marker whole, leaving a wait that can never
+    be satisfied. Refuse those, say why, and let the caller keep its line.
+    """
+    if not text or not text.strip():
+        return "nothing was typed"
+    if "\n" in text.rstrip("\n"):
+        return "several lines were typed at once"
+    bare = unquoted(text)
+    if re.search(r"(^|\s)#", text):
+        return "the line carries a comment, which would eat the marker"
+    if "<<" in bare:
+        return "a heredoc body is still to come"
+    if text.rstrip().endswith("\\"):
+        return "the line continues onto the next one"
+    # Completeness and quote/brace balance are the shell parser's question.
+    # Counting characters refuses ordinary lines (`echo "don't"`, `echo done`,
+    # `case x in a) echo hi;; esac`) that the parser accepts with the suffix.
+    words = bare.split()
+    if len(words) == 1 and words[0] in ("!", "time"):
+        # These are valid lines to a parser (`!; printf …` is legal), but the
+        # suffix would read the status of the reserved word, not of a command
+        # the caller asked for.
+        return "the line ends on a shell keyword that expects a command"
+    tail = bare.rstrip()
+    if tail.endswith(("&&", "||", "|", "&")):
+        return "a background job or a dangling operator reports no completion of its own"
+    if tail.endswith(("<", ">", "=")):
+        return "the line ends mid-redirection"
+    return None
+
+
+# How to ask each shell whether a line is a complete command. These are parse
+# modes only (`-n`): the shell reads the text and exits, it does not run a
+# command, a substitution or a redirection. `busybox` needs its applet named.
+_SHELL_PARSERS = {
+    "bash": ("bash", "--noprofile", "--norc"),
+    "zsh": ("zsh", "-f"),
+    "sh": ("sh",), "dash": ("dash",), "ksh": ("ksh",),
+    "mksh": ("mksh",), "pdksh": ("pdksh",), "ash": ("ash",),
+    "posh": ("posh",), "lksh": ("lksh",), "busybox": ("busybox", "sh"),
+}
+
+
+def parser_refusal(text: str, shell: str) -> str | None:
+    """Ask the target shell whether `text` (line + marker suffix) parses, or why not.
+
+    Shape checks can name the cases someone thought of; the shell's own parser
+    is the general answer. `while true`, `if true`, `case x in` and
+    `function f()` all end a line without ending the construct, and appending
+    our `; __tu_ec=…` would move the suffix inside it. A parse failure means
+    the line is not complete enough to carry a marker, so `send` returns
+    `skipped` instead of guessing. `-n` parses without executing: substitutions
+    and redirections in the candidate are not run.
+    """
+    argv = _SHELL_PARSERS.get(shell)
+    if argv is None:
+        return ("this shell has no parser check available, so the line cannot "
+                "be proven complete")
+    try:
+        res = subprocess.run([*argv, "-n", "-c", text],
+                             capture_output=True, text=True, timeout=2.0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ("the shell parser could not check this line, so it cannot be "
+                "proven complete")
+    if res.returncode == 0:
+        return None
+    detail = (res.stderr or "").strip().splitlines()
+    return ("the shell's own parser says this line is incomplete or invalid"
+            + (f" ({detail[0]})" if detail else ""))
+
+
+def sentinel_for(line: str) -> str:
+    """The suffix to append to `line` — without ever producing a `;;`.
+
+    A caller that typed `cd /tmp;` already ended its command; adding the
+    sentinel's own separator would make bash choke on a syntax error, which is a
+    worse outcome than the missing marker we were trying to fix.
+    """
+    return SENTINEL[1:] if line.rstrip().endswith(";") else SENTINEL
+
+
+def strip_sentinel(text: str | None) -> str | None:
+    """`text` with an appended completion sentinel removed.
+
+    The note naming "the command this exit code came from" describes the line the
+    caller wrote; our own printf is not a stage of their command, and quoting it
+    back would blame the caller's `;` for something term-use added.
+    """
+    if not text:
+        return text
+    for suffix in (SENTINEL, SENTINEL[1:]):
+        i = text.find(suffix)
+        if i >= 0:
+            return text[:i]
+    return text
+
+
+def tracked_line_answered(session: str, state: dict | None) -> bool:
+    """Did the last sentinel-bearing line report back?
+
+    The question `send` has to ask before lengthening another line: if a program
+    holds the tty (a REPL, `ssh`, a password prompt) our previous line went to
+    *it* as ordinary input, the shell never ran the printf, and appending again
+    would corrupt that program's input. Our own marker coming back is the only
+    proof that the shell consumed the line: what the foreground process happens
+    to be called answers a different question.
+
+    `last_tracked_offset` is the outstanding proof and survives a send that had
+    to answer `paused`: the paused send did not create a new tracked line, so it
+    must not erase the one still waiting. Only its `D` (or a later tracked line)
+    moves the question forward.
+    """
+    since = (state or {}).get("last_tracked_offset")
+    if since is None:
+        return True                      # nothing to prove yet
+    return records.markers_seen(session, since, kinds=("D",))
+
+
+def native_completed(meta: dict | None, baseline: dict | None) -> bool:
+    """Did the send stamped in `baseline` finish, per tmux 3.8?
+
+    The native fields bind by start/end time, so this is the proof the send-side
+    rule can use when a detached recorder never wrote the previous `D`.
+    """
+    nat = native_state(meta)
+    base = baseline or {}
+    if not nat or not isinstance(base, dict) or nat["running"]:
+        return False
+    if nat["status"] is None:
+        return False
+    start, base_start = nat["start_time"], base.get("start_time")
+    if base_start is not None and start is not None and start <= base_start:
+        return False
+    if (nat["end_time"] or 0) > (base.get("end_time") or 0):
+        return True
+    return base.get("status") is None or nat["status"] != base.get("status")
+
+
+def previous_marker_answered(session: str, state: dict | None,
+                             meta: dict | None = None,
+                             baseline: dict | None = None) -> bool:
+    """Did the last marker-bearing send report its completion?
+
+    A new marker can only be attributed when the command before it is no
+    longer in flight: a marker from that command arriving after the new echo
+    is otherwise indistinguishable from the new command's own. This is the
+    send-side half of marker attribution (the wait-side barrier is the other).
+    A shell marker may be proved by tmux's own start/end times when raw.log is
+    blind; a sentinel marker may not, because tmux cannot see its nonce.
+    """
+    st = state or {}
+    source = st.get("last_marker_source") or st.get("marker_source")
+    if source == "paused" and st.get("last_tracked_offset") is not None:
+        source = "sentinel"          # an old paused state: the sentinel is the proof
+    if source not in ("shell", "sentinel"):
+        return True
+    since = st.get("last_marker_offset")
+    if since is None:
+        if source == "sentinel":
+            return tracked_line_answered(session, st)
+        since = st.get("last_send_offset")
+        if since is None:
+            return True
+    if records.markers_seen(session, since, kinds=("D",)):
+        return True
+    if source != "shell" or meta is None:
+        return False
+    if baseline is None:
+        baseline = st.get("native_baseline")
+    return native_completed(meta, baseline)
+
+
+def marker_probe_wait(state: dict | None) -> float:
+    """How long `marker_plan` may wait for a shell's first markers.
+
+    A program pane that emits none pays the probe on every submit. A negative
+    result is cached briefly (see `marker_plan`), so typing into a REPL is not
+    charged 1.5 s per line; the window expires because a remote shell may
+    connect and start emitting later.
+    """
+    until = float((state or {}).get("marker_probe_until") or 0)
+    return 0.0 if until > time.time() else 1.5
+
+
+def marker_plan(session: str, state: dict | None, text: str,
+                enabled: bool = True,
+                probe_wait_s: float = 1.5) -> tuple[str, str | None]:
+    """Decide who supplies the completion marker for this send.
+
+    "shell"    — the pane already emits markers (ours or someone else's: fish,
+                 VSCode's 633, a user integration), so the line is left exactly as
+                 typed;
+    "sentinel" — a managed POSIX shell whose recent stream carries no markers at
+                 all: append ours, or the alternative is no fact level whatsoever;
+    "skipped"  — the line cannot carry the suffix safely (see `sentinel_refusal`).
+
+    The stream, not `start`'s launch-time guess, is the authority — and only the
+    shell's *own* evidence counts: `records.shell_markers_proven` looks for prompt
+    markers plus a done marker, because our sentinel would otherwise certify a dead
+    shell as integrated after the first line we had to narrate ourselves.
+    """
+    if state is None:
+        return "skipped", "no records cover this pane, so nothing is tracked"
+    if not text:
+        return "skipped", "nothing was typed"
+    if not enabled:
+        return "skipped", "disabled by TERM_USE_SENTINEL"
+    if records.shell_markers_proven(session):
+        return "shell", None
+    if state.get("shell_integration"):
+        # `start` injected the hooks. Give the first prompt a bounded chance to
+        # reach the recording: a fast machine can send before bash has painted
+        # it, and narrating then lengthens the first line (and redraws it, which
+        # shifts whatever the program paints). A shell whose rc blocks before
+        # the hooks install still falls through to the sentinel.
+        first_wait = min(probe_wait_s, 1.0)
+        if records.detect_shell_integration(session, wait_s=first_wait):
+            return "shell", None
+        if probe_wait_s > 0:
+            state["marker_probe_until"] = time.time() + 30
+    if not sentinel_possible(state):
+        if records.detect_shell_integration(session, wait_s=probe_wait_s):
+            # A shell term-use cannot narrate, but whose stream already carries
+            # OSC 133/633: it reports for itself (fish >= 4, a user integration).
+            # The launch-time flag is not the proof; the bytes are. The short
+            # wait covers a shell that paints its first prompt late.
+            return "shell", None
+        if probe_wait_s > 0:
+            state["marker_probe_until"] = time.time() + 30
+        name = shell_word((state or {}).get("cmd")) or "unknown"
+        return "skipped", (f"this shell ({name}) is not one the sentinel can be "
+                           f"written for")
+    if not shell_owns_the_pane(state.get("cmd")):
+        # A shell invoked with -c or a script operand *is* the program: the
+        # next line is its stdin, and `sh -c python3` would execute our suffix.
+        # Markers already in the stream still count as its own channel.
+        if records.detect_shell_integration(session, wait_s=probe_wait_s):
+            return "shell", None
+        if probe_wait_s > 0:
+            state["marker_probe_until"] = time.time() + 30
+        name = shell_word(state.get("cmd")) or "unknown"
+        return "skipped", (f"this pane runs a program, not an interactive shell "
+                           f"({name}); a marker appended to a line would become "
+                           f"its input")
+    reason = sentinel_refusal(text)
+    if reason:
+        return "skipped", reason
+    parsed = parser_refusal(text + sentinel_for(text),
+                            shell_word((state or {}).get("cmd")))
+    if parsed:
+        return "skipped", parsed
+    return "sentinel", None
+
+
+def choose_done_oracle(state: dict | None, trackable: bool = False) -> str:
     """Which oracle `wait --done` should use for this target.
 
     An oracle is named only when its evidence actually exists — the whole
     point of --done is that the agent does not have to know what the target
     supports, and it must never be told "fact" by a lucky screen scrape.
+    The decision stays a pure function of `state`, so callers carry the
+    burden of folding in what the *stream* proved: `cmd_wait` re-reads
+    `detect_shell_integration()` and persists it before calling this, which
+    is how fish >= 4.0 and someone else's OSC 633 integration stop being
+    offered "quiet" plus advice to restart in a shell they are already in.
+
+    `trackable` is the same kind of outside evidence: a managed POSIX shell that
+    emits nothing can still be asked, because the `true` probe carries term-use's
+    own completion sentinel — so it gets a fact oracle instead of sampling. A
+    program that *is* the pane is checked first: pane death outranks any marker.
+    On tmux 3.8 the native command status is a first-class oracle: when the
+    baseline carries evidence (a status, a running command, a prompt, or this
+    send's own sentinel), it answers by start time where the recording cannot.
     """
     if state is None:
         return "quiet-unmanaged"          # no records: screen stability only
+    if state.get("marker_source") in NO_MARKER_SOURCES:
+        # No fact oracle can answer for a line that carried no marker. The CLI
+        # refuses --done/--cmd-done here; this name is kept as a pure answer.
+        return "no-marker"
+    if program_is_pane(state.get("cmd")):
+        # Pane death is the stronger fact when the pane's process *is* the
+        # target; the native command status is for the shell that survives it.
+        return "pane-exit"
+    if state.get("native_available"):
+        base = state.get("native_baseline") or {}
+        has_native_evidence = (base.get("status") is not None
+                               or bool(base.get("running"))
+                               or base.get("prompt_time") is not None
+                               or state.get("marker_source") == "sentinel")
+        if has_native_evidence:
+            # On 3.8 tmux parses the pane's markers itself. It answers by start
+            # time, so it is the stronger oracle whenever the recorder is
+            # blind or the shell is not one `start` could inject into.
+            return "probe" if not state.get("last_send_offset") else "native"
+    if state.get("marker_source") == "sentinel":
+        # Our own sentinel wrote the marker; the shell may emit no OSC 133 of
+        # its own. Read the recording (or the native channel above).
+        return "osc133" if state.get("last_send_offset") else "probe"
     if state.get("shell_integration"):
         return "probe" if not state.get("last_send_offset") else "osc133"
-    if program_is_pane(state.get("cmd")):
-        return "pane-exit"
+    if trackable and state.get("marker_source") not in ("skipped", "paused"):
+        # A shell that cannot report for itself can still be *asked*: the `true`
+        # probe carries term-use's own sentinel, so a fact channel exists even
+        # where the rc file owns the prompt. (Once any marker is in the stream —
+        # ours or the shell's — `cmd_wait` has already recorded the session as
+        # integrated and the branch above answers instead.) A line whose marker
+        # was skipped or paused has nothing the probe could answer for: the
+        # probe would be a *new* command, so sampling is the honest fallback.
+        return "probe"
     return "quiet"
 
 
 DONE_VIA = {
     "osc133": "osc133",
+    "native": "tmux-command-status",
     "probe": "shell-ready-probe",
     "pane-exit": "pane-exit",
     "quiet": "quiet-sampling",
     "quiet-unmanaged": "quiet-sampling-unmanaged",
+    "no-marker": "no-marker",
 }
 
 
@@ -429,6 +1015,12 @@ def oracle_advice(state: dict | None, chosen: str | None) -> str | None:
                     "proves some text is on the screen. Add --since-send to "
                     "make --until match only output produced after the last "
                     "send (kills stale anchors).")
+        if state.get("marker_source") == "sentinel":
+            return ("this send was narrated by term-use's sentinel — no OSC 133 "
+                    "marker had reached the recording when it was sent — so "
+                    "--done reads the code the sentinel wrote. Wait for that D "
+                    "before the next line; the sentinel printf is the last "
+                    "stage, so a later `$?` is 0.")
         return ("no shell integration in this session: anchor --until on the "
                 "program's own output, or start with --cmd bash/--cmd zsh to "
                 "get fact-level --done")
@@ -528,10 +1120,11 @@ class QuietCondition(Condition):
     """Animation-immune stability (heuristic).
 
     Two independent gates:
-    1. Output activity: the raw o-stream's last event must be older than
-       the quiet interval (immune to screen-content resonance, where a
-       cyclic animation happens to repaint identical frames at sampling
-       time).
+    1. Output activity: the raw o-stream's last *cell-reaching* write must be
+       older than the quiet interval (immune to screen-content resonance, where
+       a cyclic animation happens to repaint identical frames at sampling time).
+       Bytes that paint nothing — window titles, OSC 133 markers, clipboard and
+       notification reports — do not hold this gate open; see `cell_visible`.
     2. Screen stability: (screen, cursor_x/y, alternate_on, history_size)
        must be identical across two samples spaced >= interval apart.
 
@@ -546,8 +1139,10 @@ class QuietCondition(Condition):
         self.ms = ms
         self.interval = max(ms / 1000, 0.25)  # sampling floor: 250ms
         self._last = None
+        self._stable_since = None   # monotonic start of the current stable sample
         self._open_2026 = 0
-        self._last_o_ts = None  # elapsed of the newest o-event
+        self._last_o_ts = None  # elapsed of the newest o-event that can paint
+        self._osc_carry = ""    # an OSC sequence split across two o-events
         self._scan_offset = 0
         self._tail = ""
         self.silent_unproven = False
@@ -556,6 +1151,7 @@ class QuietCondition(Condition):
         # first scan below; without it a silent program reads as "settled".
         self._send_offset = 0
         self._saw_output = False
+        self._saw_event = False   # any complete o-event, painting or not
         self.state: dict | None = None
         if not managed:
             # Unmanaged pane: no raw.log, so gate 1 (stream last-write) cannot
@@ -583,14 +1179,31 @@ class QuietCondition(Condition):
             return
         if size <= self._scan_offset:
             return
+        with path.open("rb") as fh:
+            fh.seek(self._scan_offset)
+            chunk = fh.read()
+        # Advance only past complete lines. A writer can be interrupted mid-line;
+        # treating the file size as the next scan start would skip that event
+        # forever, and quiet detection would call the missing output silence.
+        complete = chunk.rfind(b"\n") + 1
+        if complete == 0:
+            return
+        end_offset = self._scan_offset + complete
         text = ""
         for ts, code, data, pos in records.events_since(self.session, self._scan_offset):
-            if code == "o" and isinstance(data, str):
-                self._last_o_ts = ts
-                if pos >= self._send_offset:
-                    self._saw_output = True
-                text += data
-        self._scan_offset = size
+            if pos >= end_offset:
+                break
+            if code != "o" or not isinstance(data, str):
+                continue
+            self._saw_event = True
+            painted, self._osc_carry = cell_visible(data, self._osc_carry)
+            if not painted:
+                continue          # a title, a cwd report, a marker: zero cells
+            if pos >= self._send_offset:
+                self._saw_output = True
+            self._last_o_ts = ts
+            text += painted
+        self._scan_offset = end_offset
         buf = self._tail + text
         for i in range(len(buf) - 7):
             if buf.startswith("\x1b[?2026h", i):
@@ -614,12 +1227,32 @@ class QuietCondition(Condition):
         # just before the next frame lands.
         if self.managed:
             if self._last_o_ts is None:
-                return False
-            idle = (time.time() - self.t0) - self._last_o_ts
-            if idle < self.interval * 1.25:
-                self._last = sample
-                return False
+                if native_state(m) is None:
+                    return False
+                # Gate 1 has no paintable write to time. If the recorder wrote
+                # nothing at all it is blind; a stream of titles/clipboard/
+                # markers is working and simply paints nothing, and the
+                # verdict says that with `silent_unproven` instead.
+                self.degraded = None if self._saw_event else "recorder-blind"
+                now = time.monotonic()
+                if self._last != sample:
+                    self._last = sample
+                    self._stable_since = now
+                    return False
+                if self._stable_since is None:
+                    self._stable_since = now
+                    return False
+                if now - self._stable_since < self.interval:
+                    return False
+            else:
+                self.degraded = None
+                idle = (time.time() - self.t0) - self._last_o_ts
+                if idle < self.interval * 1.25:
+                    self._last = sample
+                    return False
         # Gate 2: screen snapshot stability across spaced samples.
+        if self._last != sample:
+            self._stable_since = None
         if self._last == sample:
             # Settled means the DISPLAY stopped changing. A `met` here is
             # routinely read as "the command finished", which it is not
@@ -638,18 +1271,14 @@ class QuietCondition(Condition):
     def _program_busy(self, meta: dict | None) -> bool:
         """Is a command in flight? True on fact evidence only, in this order.
 
-        tmux 3.8 says `running`, otherwise the absence of `D` after a `C` in our
-        own stream says it. `pane_current_command` is deliberately NOT consulted:
-        measured on 3.7c it fell back to `bash` 1.2s into a `sleep 5`, so as a
-        liveness signal it is a lie at exactly the timescale a settle happens on.
+        tmux's own command tracking says `running`; otherwise a `C` with no `D`
+        since the send says it in our own stream. What is in the foreground is a
+        different question from whether this send completed, and the foreground
+        name cannot answer this one, so it is not consulted here.
         """
-        nat = native_state(meta)
-        if nat and nat["running"]:
-            return True
-        if self.state is not None:
-            return in_flight(self.session,
-                             int(self.state.get("last_send_offset", 0) or 0))
-        return False
+        return in_flight(self.session,
+                         int((self.state or {}).get("last_send_offset", 0) or 0),
+                         meta, self.state)
 
     def to_json(self, met: bool) -> dict:
         out = {**super().to_json(met), "ms": self.ms}
@@ -679,7 +1308,11 @@ def native_state(meta: dict | None) -> dict | None:
         return None
     return {"running": bool(m.get("pane_command_running")),
             "status": m.get("pane_command_status"),
+            "start_time": m.get("pane_command_start_time"),
             "end_time": m.get("pane_command_end_time"),
+            "duration": m.get("pane_command_duration"),
+            "prompt_time": m.get("pane_last_prompt_time"),
+            "last_output_time": m.get("pane_last_output_time"),
             "generation": m.get("pane_output_generation")}
 
 
@@ -690,13 +1323,18 @@ def _managed_shell(state: dict | None) -> str:
 
 def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
                        since_offset: int, ctx=None,
-                       after_timeout: bool = False) -> TDError | None:
+                       after_timeout: bool = False,
+                       trackable: bool = False) -> TDError | None:
     """Name the reason a shell-protocol wait can never be satisfied, if there is one.
 
     Three states look alike from the outside and need different answers: the
     command is still running (wait), the marker channel is dead (change channel),
     the session is wedged (reconnect). Without this, the second one is reported
     as the first and the hint pushes agents into the third.
+
+    `trackable` suppresses the dead-channel claim for a shell `send` can narrate
+    itself: not one marker has arrived yet, but the sentinel will make one, so
+    refusing before the wait would refuse a channel that works.
     """
     fg = str((meta or {}).get("pane_current_command") or "")
     nat = native_state(meta)
@@ -757,20 +1395,31 @@ def protocol_diagnosis(session: str, state: dict | None, meta: dict | None,
             evidence=ev())
     if state is not None and state.get("shell_integration"):
         if (not records.markers_seen(session, 0, kinds=("C", "D"))
-                and not nat_has_evidence):
+                and not nat_has_evidence and not trackable):
             return TDError(
                 "shell-protocol-unavailable",
                 f"session {session!r} was given shell integration but has emitted "
                 f"no command markers at all",
                 hint="the shell's own startup files likely replaced the injected "
                      "hooks (starship/powerline rewrite PROMPT_COMMAND every "
-                     "prompt). Use --until 'regex' --since-send or print your own "
-                     "sentinel; `trace -n " + session + " --format json` shows "
-                     "what actually came through.",
+                     "prompt). The other shape is an rc file that takes over the "
+                     "read loop itself — a prompt wrapper that clears PS1 and "
+                     "PROMPT_COMMAND and reads lines in its own program (blerust, "
+                     "some instant-prompt setups) — and then no marker can ever "
+                     "be emitted, because bash never runs its own prompt cycle. "
+                     "Start the shell with its wrapper disabled (the rc files "
+                     "usually guard on an env var), or use --until 'regex' "
+                     "--since-send or print your own sentinel; `trace -n " + session +
+                     " --format json` shows what actually came through.",
                 evidence=ev())
         if (fg in ("", _managed_shell(state))
                 and not records.markers_seen(session, since_offset)
+                and (state or {}).get("marker_source") in (None, "shell", "sentinel")
                 and (records.output_age_s(session) or 0) > 1.0):
+            # Only a send that was supposed to make a marker can be diagnosed as
+            # "the channel died": a keys-only submit or a refused sentinel
+            # produces none by design, and calling that a stolen
+            # PROMPT_COMMAND sends an agent hunting a framework that is fine.
             # PS0 emits C and PROMPT_COMMAND emits D, so a framework that took
             # PROMPT_COMMAND back leaves exactly the same mark as a shell blocked
             # on `read`: a C with no D and a quiet pane. Markers alone cannot
@@ -935,26 +1584,44 @@ def line_scope(text: str | None) -> str | None:
     if ";" in bare or "\n" in bare:
         notes.append(f"`;`: the number is `{last}` alone — an earlier command on this "
                      "line can have failed unseen (evidence.screen proves it)")
-    if "@@" in flat:
-        notes.append(f"`&&`/`||`: zero means every stage passed; the number itself is "
+    if "&&" in bare:
+        notes.append(f"`&&`: zero means every stage passed; the number itself is "
                      f"`{last}` — the last stage that ran")
+    if "||" in bare:
+        # A zero here is the opposite claim: the *earlier* stage already
+        # succeeded and this one never ran, so it cannot be reported as if it
+        # had a code of its own.
+        notes.append(f"`||`: zero means an earlier stage already succeeded and "
+                     f"`{last}` may never have run; a non-zero is `{last}`")
     if "|" in flat:
         notes.append(f"pipeline: the number is the last stage's (`{last}`), unless the "
                      "shell sets pipefail")
     if "&" in flat:
         notes.append("`&`: done means launched, not finished")
-    return "; ".join(notes) or None
+    return ". ".join(notes) or None
 
 
-def in_flight(session: str, since_offset: int) -> bool:
+def in_flight(session: str, since_offset: int, meta: dict | None = None,
+              state: dict | None = None) -> bool:
     """A command started after that offset and has not reported completion.
 
-    `C` with no following `D` in term-use's own recording — so it works on every
-    tmux version, unlike `pane_command_running`. Without this reading a timeout is
-    three-way ambiguous: *this is a command still running*, not a dead channel and
-    not a program sitting on the shell, and it must not come with a "loosen your
-    --until" hint.
+    Three readers, any of which may be blind: our own sentinel's outstanding
+    `D`, tmux 3.8's native `pane_command_running`, and `C` with no following
+    `D` in term-use's own recording. A timeout must not call a running command
+    "finished" because the recorder was detached, so any reader saying
+    "in flight" wins. `E` is not a completion (VSCode's `633;E` carries the
+    command line).
     """
+    st = state or {}
+    if st.get("marker_source") in ("sentinel", "paused") \
+            and not tracked_line_answered(session, st):
+        # The line we narrated ourselves has not reported back. A clobbered
+        # shell emits no C at preexec, so native/byte readers are blind here;
+        # the outstanding sentinel is the only proof that work is still out.
+        return True
+    nat = native_state(meta)
+    if nat is not None and nat["running"]:
+        return True
     try:
         text = records.stream_since(session, since_offset)
     except (TDError, OSError):
@@ -963,18 +1630,44 @@ def in_flight(session: str, since_offset: int) -> bool:
     if start < 0:
         return False
     tail = text[start:]
-    return not any(f"\x1b]{code};{kind}" in tail
-                   for code in ("133", "633") for kind in ("D", "E"))
+    return not any(f"\x1b]{code};D" in tail for code in ("133", "633"))
 
 
 def timeout_hint_for(cond: "Condition", busy: bool = False) -> str:
     if busy:
-        return ("a command reported its start (OSC 133 C) and has not reported a "
-                "completion since, so this snapshot is mid-flight — the wait did "
-                "not fail, the program is not finished. Raise --timeout and keep "
-                "waiting, or read evidence.screen: if the program is asking for "
-                "input, send that input. Do not loosen --until on a running "
-                "command, and do not send a quit key without looking.")
+        return ("a command reported its start and has not reported a completion "
+                "since, so this snapshot is mid-flight — the wait did not fail, "
+                "the program is not finished. Two readings: it is waiting for "
+                "input (read, a password prompt, a menu) and you should send that "
+                "input; or a prompt framework took PROMPT_COMMAND back and the "
+                "completion hook died, which evidence.screen tells apart from an "
+                "idle prompt. Raise --timeout and keep waiting, or use --until "
+                "'regex' --since-send for the other channel. Do not loosen "
+                "--until on a running command, and do not send a quit key "
+                "without looking.")
+    members = (cond.conditions if isinstance(cond, AllOf) else [cond])
+    if any(getattr(c, "degraded", None) == "no-marker" for c in members):
+        return ("the last send carried no completion marker (it was paused, "
+                "skipped, or had no line), so a done marker after it belongs to "
+                "an earlier command. This line's completion cannot be a fact: "
+                "wait on its own output with --until --since-send, or print a "
+                "marker yourself.")
+    if any(getattr(c, "degraded", None) == "unattributed-marker" for c in members):
+        return ("a completion marker did land inside this send's window, but nothing "
+                "in the recording binds it to this send — the recorder was behind "
+                "when the offset was drawn, so that code belongs to the command "
+                "before yours and reporting it would be a guess. Run the wait again "
+                "(the echo of your line usually lands within a second and settles the "
+                "binding), type the command with --type rather than sending bare "
+                "keys, or ask the shell directly with --shell-ready. This is not "
+                "'still running', and it is not a quit key.")
+    if any(getattr(c, "degraded", None) == "native-ambiguous" for c in members):
+        return ("this send was narrated by term-use's sentinel, the recording has "
+                "no completion for it, and the shell is known to emit OSC 133 of "
+                "its own — tmux's status may be the shell's later D;0 (it reads "
+                "the sentinel's printf as `$?`=0), so the wait will not report it "
+                "as a fact. Use --until 'regex' --since-send, or run the wait "
+                "again once the recording has caught up.")
     return timeout_hint(cond)
 
 

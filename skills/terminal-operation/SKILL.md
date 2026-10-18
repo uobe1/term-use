@@ -30,7 +30,11 @@ observation says what it cost your context. CLI: `term-use`, or
    what to type.
 5. **On a failure, read `hint`, then `evidence`.** The hint is the tool's diagnosis and
    usually holds the next command. Never send a quit key without looking at
-   `evidence.screen` first.
+   `evidence.screen` first. When a fact channel refuses (`marker: skipped|paused`,
+   `no-shell-integration`, `shell-protocol-unavailable`, `unmanaged-pane`), change
+   channel instead of enumerating shells: submit a marker you own in the target's own
+   language, use `--until --since-send`, or poll `screen`/`out`. Never append shell
+   syntax to a program holding the tty. Per-refusal details: `references/channels.md`.
 
 ## The loop
 
@@ -47,7 +51,9 @@ $TD wait  -n demo --socket "$SOCK" --done --expect-code 0        # one verdict: 
 ```
 
 `--socket NAME` belongs on **every** subcommand, not only on `sessions`; a private socket
-with no server yet answers `[]` (with a note), not an error. `wait` defaults to
+with no server yet answers `[]` (with a note), not an error. `start` answers
+`marker: shell|sentinel|unknown` — which completion channel it expects; `unknown`
+means the first send or `--shell-ready` will tell. `wait` defaults to
 `--timeout 10 --interval 0.1` — 10s is a shell, not a build, so name a real number — and
 `--done` is the recommended condition, not the CLI's default one; say it. Stop what you
 start: `stop` (killing the last session takes the tmux server, and any nested sessions,
@@ -111,7 +117,7 @@ first send, not a relative path.
 | What did it print? | `out` (since your last send; `--all` for the session) — but after a chained `cmd && cat artifact` the met wait's own `evidence.screen` already holds the answer, so do not also call `out` |
 | Which row is highlighted / what color / is X on screen / where do I click? | `screen --grep --attr reverse` / `--find TEXT` (1-based, click-ready) / `--element-at X Y` |
 | Is anything on screen at all, or did my input never land? | `screen --meta` → `blank`, `unexecuted_input`, `last_output_age_s` |
-| Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`), a met `--quiet-ms` says it (`program_running`); `pane_current_command` is only a hint — measured on 3.7c it reported `bash` 1.2s into a `sleep 5` |
+| Is a command running right now? | `wait --done`'s failure says it (`evidence.in_flight`); a met `--quiet-ms` says it (`program_running`); `screen --meta`'s `pane_command_running` says it when the server tracks commands |
 | How is this frame laid out? | `screenshot` — once |
 | Something else must hold too | add it to the same `wait` (AND; weakest confidence wins) |
 
@@ -135,16 +141,35 @@ first send, not a relative path.
   match the wrapped screen. `~/.../` on screen is the shell's PS1, not term-use — use
   `screen --meta`'s `pane_current_path` for the real cwd.
 - **Confirmation keys**: wait for the prompt text itself before Enter — a key sent early
-  lands in the edit buffer and corrupts state (measured on nano `C-o` + Enter).
+  lands in the edit buffer and corrupts state.
 - **Menu arrows debounce**: `send --key Up --key Up` in one call moves once. One key per
   call ~0.35s apart, or `--repeat 3 --delay 0.35`; verify the highlight landed by re-running
   the `--grep` before Enter. `less`'s search highlight is not `reverse` — pagers need a
   text anchor.
 - **Spinners defeat quiet** (frame-cycle resonance): pick 2-3x the observed frame period;
-  prefer a done-marker. Live monitors (top/htop) can be captured mid-repaint — read two
-  frames ~2s apart and answer only if they agree, from the per-process rows.
+  prefer a done-marker. A spinner that only rewrites the *window title* is not animation
+  on screen — `--quiet-ms` settles through it, and says so (`program_running`). Live
+  monitors (top/htop) can be captured mid-repaint — read two frames ~2s apart and answer
+  only if they agree, from the per-process rows.
+- **A marker inside your window is not automatically your command's.** A `--done` timeout
+  saying `unattributed-marker` means it could not be bound to your send: send the line
+  with `--type` (not bare keys), or ask with `--shell-ready`. Details: `channels.md`.
 - **REPLs**: any colon-opening statement enters the continuation prompt and needs one
   extra empty Enter. Prefer one-liners; anchor on the block's result, not the prompts.
+- **A shell may not report its own exit code.** `send` answers `marker`: `shell`
+  (text untouched), `sentinel` (term-use appended its own completion printf —
+  `sent.text` is what ran), `paused` (a program holds the tty, or the previous
+  marker line has not reported back; nothing is appended) or `skipped` (the suffix
+  cannot be made safe). A send with no marker of its own cannot be answered by
+  `--done`/`--cmd-done` — they refuse with `shell-protocol-unavailable` instead of
+  borrowing an earlier marker. Wait on its own output with `--until --since-send`,
+  or own a marker; `--quiet-ms` is the explicit display-stability question. The
+  sentinel's printf is the line's last stage, so a later command's `$?` is 0 —
+  read the code from the verdict, not from `$?`. A `skipped`/`paused` result
+  carries `marker_hint` with the next move. A sentinel is offered only for a
+  shell term-use recognizes as POSIX and whose own parser accepts the exact line
+  it would type; an unrecognized command name is skipped even if the binary is
+  bash. Specific shells and reasons live in `references/channels.md`.
 - **A blank screen is a state**, not an error: `clear`, an exited full-screen program, or a
   quiet daemon. `screenshot` still writes a pane-shaped image and reports `blank: true`.
 - **tmux can exit 0 and still have failed** (a default socket owned by someone else, an
@@ -159,9 +184,9 @@ first send, not a relative path.
 | `timeout` | the condition did not become true in time | read `evidence.screen`; re-anchor or raise `--timeout`; the target is still alive |
 | `expect-code-mismatch` | it finished, with a different code | report the code — this is an answer, not a fault |
 | `shell-not-ready` | something still holds the terminal (a REPL, a TUI) | read the screen, send that program's own quit key, re-probe |
-| `shell-protocol-unavailable` | the fact channel **cannot** answer here (foreground is `ssh`/`mosh`/nested `tmux`, or the hooks were replaced) | change channel: `--until 'regex' --since-send`, or print your own sentinel. Never a quit key on this alone — check `evidence.screen`: an idle prompt means the hooks died, a program asking for input means send it |
-| `unmanaged-pane` | term-use did not start that pane (no recording) | `--until`/`--quiet-ms`/`screen`/`send`/`clear` still work at degraded confidence; start your own session if you need fact-level waits |
-| `no-shell-integration` | this shell emits no completion markers | `--cmd bash`/`--cmd zsh` for injected hooks, or wait on program output / `--exit` |
+| `shell-protocol-unavailable` | the fact channel **cannot** answer here: the foreground process is not the shell that was started, its hooks were replaced, or the last send carried no marker of its own (`paused`/`skipped`) | change channel: `--until 'regex' --since-send`, or print your own sentinel. Never a quit key on this alone — check `evidence.screen`: an idle prompt means the hooks died, a program asking for input means send it. Which passthrough/REPL shapes look like this: `references/nested-tmux.md` |
+| `unmanaged-pane` | term-use did not start that pane (no recording) — **or** the pane you addressed (`-n NAME:1.0`) is not the one its records describe | `--until`/`--quiet-ms`/`screen`/`send`/`clear` still work at degraded confidence; drop the window/pane suffix, start that pane too, or start your own session if you need fact-level waits |
+| `no-shell-integration` | this shell emits no completion markers and this server has no native command status | start a shell term-use can inject into; a managed, **recognized** POSIX shell whose stream proves nothing gets a sentinel appended by `send` itself (Traps), so this refusal now means the shell is not one the sentinel can be written for (an unknown command name counts), or the line was `skipped`; otherwise wait on program output / `--exit`. Shell examples: `references/channels.md` |
 | `socket-unreachable` | tmux itself is unreachable — one fault reports one code, from `send`, `wait` and `stop` alike | honour the hint: `--socket NAME`, check `TMUX_TMPDIR`. If `sessions` answers `[]` while a server is alive (`pgrep -aft 'tmux.*NAME'`), the socket file was removed underneath it: `tmux -L NAME kill-server`, then start again |
 | `pane-dead` / `pane-dead-by-signal` | the target died mid-wait | read the signal name from the evidence; respawn if needed |
 | `pillow-missing` / `font-missing` | image channel unavailable | use the text channels (a font ships as a last resort, so this is rare) |
@@ -179,10 +204,10 @@ Do not read these up front — each is for a moment you will recognize:
   alternate-screen handovers. Read it before driving anything you have not already run.
 - `references/nested-tmux.md` — a tmux client inside a term-use pane, `$TMUX`, addressing
   inner panes by socket name, and what degrades on unmanaged panes.
-- `references/tmux-versions.md` — what tmux 3.8+ answers natively (`pane_command_running`,
-  `pane_command_status`), what 3.2a–3.7c cannot answer, and why an absent key is the
-  version answer rather than an empty one. Read it only if you are on 3.8 or the tool's
-  fact waits are behaving oddly.
+- `references/tmux-versions.md` — what the server answers natively (`pane_command_running`,
+  `pane_command_status`), what a server without command tracking cannot answer, and why an
+  absent key is the version answer rather than an empty one. Read it when the tool's fact
+  waits are behaving oddly.
 
 ## Red lines
 

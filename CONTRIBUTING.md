@@ -31,7 +31,7 @@ Format `vX.Y[.Z]aN` / `vX.Y[.Z]bN` / `vX.Y[.Z]`, where `X` is the major version 
 
 `N` counts iterations within that line and resets when `X.Y` advances
 (`2.0.0a9` → `2.1.0a1`). `pyproject.toml` carries the same number without the `v`
-(`2.0.0a6`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
+(`2.0.0a7`), which stays PEP 440-valid so `uv`/`pip` sort it correctly.
 
 **Three lines, three branches** — alpha, beta, and formal advance independently; they
 are *not* force-synced. Routing:
@@ -90,27 +90,57 @@ Cherry-pick forward (alpha → beta → formal); never rewrite a line the other 
   `last_send_offset` is a byte offset into `raw.log`, never a timestamp.
 - **A completion is authorized, not merely positioned**: `send` reads its offset from
   the recording's current size while the recorder lags the pane, so the *previous*
-  command's `C` and `D` can both land after it. `CmdDone` accepts a `D` only when the
-  `C` that opened it is also inside the send's window, and tmux 3.8's native answer is
-  rejected while `pane_command_start_time <= baseline` even if `end_time` moved. Position
-  alone is not ownership — a met `fact` for the command before yours is the worst thing
-  this tool can do.
+  command's `C` and `D` can both land after it. Position is necessary and not
+  sufficient. The send-side rule is that a new marker-bearing line is only narrated
+  when the previous marker-bearing send has reported its `D`; otherwise the line is
+  `paused` and `--done`/`--cmd-done` refuse it, because an earlier command's marker
+  arriving after the new echo cannot be told apart from the new one (a command that
+  starts late can put its `C` after our echo). For a marker the shell itself emitted,
+  `CmdDone` also requires a wait-side barrier the *same send* caused — `send`
+  measured the recorder drained (`last_send_settled`), or the echo of the injected
+  text sits between the offset and the authorizing `C`. Neither is provable → the
+  marker is reported `degraded: unattributed-marker`, never as a fact. On tmux 3.8+
+  the native answer is checked against `pane_command_start_time > baseline` first,
+  because `running` flips 1→0 with the *old* start time when a busy shell finishes.
+  Position alone is not ownership — a met `fact` for the command before yours is the
+  worst thing this tool can do.
+- **A synthesized fact must name its author.** When the pane's shell emits no OSC 133 at
+  all — an rc file that hands bash to a prompt wrapper (blerust and friends) clears
+  `PS1`/`PROMPT_COMMAND` and reads lines itself, so no injection can survive it — `send`
+  appends `; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007' "$__tu_ec"` to the line it
+  *submits*, and the code reaches the recording as bytes term-use wrote. Four rules keep
+  that honest rather than clever: only a submitting send gets one (a half-typed line is
+  never lengthened); a line whose meaning the suffix could change is refused with a reason
+  (`skipped` — background `&`, dangling pipe, open `then`/`do`, heredoc, comment,
+  unbalanced quote, or a shell that does not speak `$?`); tracking **pauses** while a
+  program holds the tty or the previous marker-bearing command is still in flight —
+  the last tracked line not reporting back is the proof that the shell never consumed
+  it, so the next line is that program's input or a line whose marker could not be
+  attributed, and appending shell syntax there is corruption; a send with no marker of
+  its own is refused by `--done`/`--cmd-done`, never answered by an earlier marker; and
+  the verdict says in its `note` that the marker was synthesized and covers the line's
+  last stage only. The reply carries `marker: shell|sentinel|paused|skipped` with a
+  reason, so nothing has to be guessed.
 - **Stateless client**: no resident daemon, no in-memory state across invocations.
 
 ### tmux compatibility
 
 tmux is the only hard dependency and the tool leans on its behavior details, so the
-supported line is stated, not implied. **Recommended: 3.8+** (native command status,
-which is what makes completion facts survive ssh/remote shells and prompt frameworks
-that rewrite `PROMPT_COMMAND`). Minimum: 3.2a, on a self-scanned fallback.
+supported line is stated, not implied. **The target line is tmux 3.8+**: native command
+status is what makes completion facts survive ssh/remote shells and prompt frameworks that
+rewrite `PROMPT_COMMAND`. A server without command tracking is a degraded path only — it
+runs on term-use's own `raw.log` scan, can prove a completion only where the recorder had
+drained or the injected text came back as echo, and must degrade (lower confidence, a
+`degraded` marker) rather than emulate. So: never add an emulation-shaped workaround where
+the native field is the fact, and never leave a test's native-channel assertions behind a
+gate the machine under test never passes — run the suite against a 3.8 server.
 
-| tmux | holds |
+| server | holds |
 |---|---|
-| 3.2a – 3.7c | everything works via term-use's own `raw.log` scan. The `pane_command_*` group does **not** exist (≤3.7c parses OSC 133 `A`/`C` only and discards `D;<code>`) — and tmux expands *any* unknown format to empty, so `tmuxio.meta()` drops the group when `pane_command_running` comes back empty. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
-| 3.7 / 3.7a / 3.7b / 3.7c | no drift here: `input_osc_133()` is byte-identical, `capture-pane -F` flags (`D H O P W X`) unchanged. `wait-for` has no `-t` and cannot list waiters |
-| 3.8 | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`; fixes the `wait-for` client leak (#5614). term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `screen --meta` exposes it, and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
+| with command tracking | `pane_command_status` / `_running` / `_start_time` / `_end_time` / `_duration`, `pane_last_prompt_time`, `pane_last_output_time`, `pane_output_generation`, `pane_command`; hooks `pane-command-started` / `-finished` / `pane-shell-prompt`. term-use reads the group as a second fact channel: `--cmd-done` consults it before replaying the recording, `--done` chooses it as an oracle when the baseline carries evidence, the integration gate accepts it, timeout `in_flight` ORs it, `screen --meta` exposes it (and takes `last_output_age_s` from `pane_last_output_time` when present), and `shell-protocol-unavailable` carries tmux's own reading in `evidence.native` |
+| without it | the `pane_command_*` formats expand to empty, so `tmuxio.meta()` drops the whole group. Absence is the version answer; an empty value would be read as "no command has finished", which is a different claim |
 
-Measured on 3.8, because the shape of that channel decides how it is used: `running`
+The shape of that channel decides how it is used: `running`
 is 0/1 whenever the group exists (so it is the presence probe), `status` stays empty
 until the first `D;<code>` marker reaches the pane, and it is filled by markers from
 **any** program in the pane — including a remote shell's, forwarded through ssh. The
@@ -126,7 +156,7 @@ program asking for input), which is why `shell-protocol-unavailable` reports the
 native reading as evidence and names both readings in its hint instead of choosing
 one for the agent.
 
-Two traps, both measured:
+Two traps:
 
 - **tmux exits 0 while failing** (`access not allowed`, `couldn't create directory …`):
   `tmuxio.ok()` — exit 0 *and* clean stderr — is the only success test.
@@ -150,14 +180,13 @@ arrow debounce, `$?` expanded before tmux sees it, kitty key encodings, …). If
 a real-world pitfall, update the skill in the same PR so agents benefit immediately.
 
 The skill is **two-layer and priced per token**: the core `SKILL.md` is what every
-session loads, so it stays short (193 lines / 14 KB today, against the 353-line / 26.7 KB
-a5 core that every arm paid) and carries only what an agent needs before acting;
+session loads, so it stays short and carries only what an agent needs before acting;
 `references/*.md` are loaded at the moment the core names them. A line earns a place in
-the core only when an arm of the A/B round had to guess or derive it — the ab8 arms
-loaded no reference at all on a plain-CLI task and still rated `doc` 2–3, which is the
-evidence that the split works and that the core should stay this size rather than grow.
+the core only when a blind arm had to guess or derive it; arms on plain-CLI tasks load
+no reference, which is the evidence that the split works and the core should stay small.
 New detail goes into a reference unless it changes a decision; rationale and
-measurements go into the repo docs, not the skill body. Do not state a rule twice.
+measurements go into the gitignored working notes, not the skill body. Do not state a
+rule twice.
 
 Is a skill revision actually better? `tests/blind/ab_skill.sh` answers that with agents
 rather than opinion — objective verdict from the fixture's end state, weighted confusion
@@ -168,9 +197,8 @@ entry, because an unarchived experiment is a story.
 
 Four rules that came out of running it, not from designing it:
 
-- **k>=2 waves, and quote the mean.** In the a6-vs-a5 round, wave 1 measured −33% wall
-  clock and −23% tokens; wave 2 measured −7% and **+4%**. The spread between waves is
-  bigger than several of the deltas, so a single wave's percentage is noise.
+- **k>=2 waves, and quote the mean.** The spread between waves is bigger than several of
+  the deltas, so a single wave's percentage is noise.
 - **`archive` takes the arm's state dirs.** An arm's `$XDG_STATE_HOME` is a mktemp path
   outside its own tree, and the recordings — the only evidence of what the tool actually
   returned — live there. Record `SOCK`/`TMPD`/wall/tokens in the round JSON too: one
@@ -179,9 +207,12 @@ Four rules that came out of running it, not from designing it:
   every arm's opening context and it names the fixture and its traps. Restore it
   afterwards.
 - **The `writes` fixture's verdict axis has no resolving power.** Four consecutive arms
-  reached BOTH_OK with zero re-sends. It catches a careless arm (an a5 arm re-ran the
+  reached BOTH_OK with zero re-sends. It catches a careless arm (one re-ran the
   non-idempotent step and got caught), and it cannot prove a careful one — so cost and
   confusion are the axes with signal, and `verdict` is a guard rail.
+- **`general` measures the channel refusals.** Its four end-state files are the proxy
+  for the habit: a survey under a paused marker, a background line with no marker, and
+  a shell term-use cannot narrate. Read its verdict beside `confusion`, not alone.
 
 ## Commit messages
 

@@ -42,21 +42,47 @@ $TD out   -n demo                       # what it printed, inside a context budg
 
 That is the whole loop: **start → send → wait for fact → read the output → act.**
 
+- `start`'s result carries `marker: shell|sentinel|unknown` — the completion
+  channel it expects. `unknown` means the first send or `--shell-ready` will tell;
+  a `skipped`/`paused` send carries `marker_hint` with the channel that still works.
 - `--done` waits for the last thing you sent to finish, choosing the strongest
   oracle the target actually supports and reporting it in `via`: the shell's
   OSC 133 done-marker (fact, with exit code) → the `true` probe when nothing has
-  been sent yet → pane death when the program *is* the pane → quiet sampling
-  (heuristic, and it says so). `advice` names a stronger channel when the target
-  could support one.
-- The done-marker oracle has two servers. term-use scans its own recording
-  (`via: osc133`); on **tmux 3.8+** the CLI asks tmux first, and when that is
-  what answered you get `via: tmux-command-status` plus a `channel` key naming
-  it. The native answer is the one that survives a stopped recorder, a prompt
+  been sent yet, or when the shell cannot report for itself → pane death when the
+  program *is* the pane → quiet sampling (heuristic, and it says so). `advice`
+  names a stronger channel when the target could support one.
+- A shell that emits **no** markers is not the end of the fact channel. `send`
+  appends a completion sentinel (`; __tu_ec=$?; printf '\033]133;C\007\033]133;D;%s\007'
+  "$__tu_ec"`) to the line it submits, so the code arrives as bytes term-use wrote —
+  the send result says `marker: sentinel`, the met verdict says the same in its
+  `note`, and the line on screen is visibly longer than what you typed. The appended
+  printf is the line's last stage, so a later command's `$?` is 0; read the code from
+  the verdict, not from `$?`. Lines the
+  suffix could change in meaning (a background `&`, a dangling pipe, an open
+  `then`/`do`, a heredoc, a comment, an unbalanced quote) and shells that do not
+  speak `$?` (fish, csh) are left alone: `marker: skipped` with the reason, and no
+  fact is claimed. Tracking also **pauses** when the last tracked line never reported
+  back — a REPL or `ssh` may hold the tty, or the previous command is still in flight —
+  and appending shell syntax would either corrupt that program's input or make the new
+  marker unattributable; it resumes once the outstanding marker arrives. A send whose
+  marker was `paused`/`skipped` has no completion event of its own, so
+  `--done`/`--cmd-done` refuse it (`shell-protocol-unavailable`) instead of borrowing
+  an earlier command's marker; use `--until --since-send`, or own a marker.
+  `TERM_USE_SENTINEL=0` refuses the append even when it would help.
+- The done-marker oracle has two servers. The CLI asks **tmux** first, and when that is
+  what answered you get `via: tmux-command-status` plus a `channel` key naming it;
+  otherwise term-use scans its own recording (`via: osc133`). The native answer is the
+  one that survives a stopped recorder, a prompt
   framework that rewrites `PROMPT_COMMAND`, and markers forwarded through ssh —
-  which is why 3.8+ is the recommended tmux.
+  which is why tmux 3.8+ is required. On 3.8 the native group is also the
+  integration gate (a detached recorder does not turn a fact wait into
+  `no-shell-integration`), a reader of the timeout's `in_flight` (a running
+  command stays in-flight when the recording is blind), and the source of
+  `screen --meta`'s `last_output_age_s` when it can answer
+  (`last_output_age_source: tmux`).
 - When no fact channel can answer, that is said out loud: `--cmd-done` /
   `--shell-ready` / `--done` raise `shell-protocol-unavailable` (the pane's
-  foreground is `ssh`/`mosh`/a nested `tmux`, or the injected hooks were
+  foreground is not the shell that was started, or the injected hooks were
   replaced) instead of timing out and hinting at a quit key. `evidence.native`
   then carries tmux's own reading — but `running: true` does **not** mean "your
   command is still going": a shell blocked on `read` and a shell whose completion
@@ -66,10 +92,12 @@ That is the whole loop: **start → send → wait for fact → read the output �
   confirms the shell took input back — a live interactive program swallows the
   probe, and the wait fails with `shell-not-ready` instead of pretending.
 - The shell protocol behind `--cmd-done` is injected for bash and zsh; fish ≥ 4.0
-  emits the markers itself and term-use notices rather than assuming. A shell
-  that cannot emit them (plain `sh`/`dash` — no pre-exec hook) gets a structured
-  `no-shell-integration`, so fall back to `--until` on the program's own output,
-  or `--exit` on pane death.
+  emits the markers itself and term-use notices rather than assuming. A POSIX
+  shell whose prompt was taken over gets term-use's own sentinel on send, and on
+  tmux 3.8 the native channel can answer even when the recording cannot. A shell
+  that can neither emit markers nor carry the sentinel (or whose line is
+  `skipped`) gets a structured `no-shell-integration`: fall back to `--until` on
+  the program's own output, or `--exit` on pane death.
 - A wrong `--expect-code` fails **immediately** with `expect-code-mismatch` —
   no timeout burn.
 - Pane death mid-wait fails immediately (`pane-dead` / `pane-dead-by-signal`
@@ -169,9 +197,8 @@ $TD send -n demo --key Up --repeat 3              # 3 arrows, default 0.35s apar
 $TD send -n demo --key C-c --repeat 2 --delay 0.3 # double-key exit rhythm
 ```
 
-The default `--delay 0.35` is the gap measured to clear real menu debouncing;
-every repetition is a separate `send-keys` call (never merged — merging is what
-menus eat).
+The default `--delay 0.35` is the gap that clears menu debouncing; every repetition is a
+separate `send-keys` call (never merged — merging is what menus eat).
 
 If `send` warns `tty-echo-broken` (your text produced no echo bytes), the
 program mangled the tty — run `fix-tty`.
@@ -197,10 +224,11 @@ picture per layout question, never a series, and never to decide what to type.
 
 ```bash
 $TD screen -n demo --meta                          # cursor, modes, history, blank, stall signals
-#    on tmux 3.8+ also pane_command_running / pane_command_status / pane_command_duration:
+#    plus pane_command_running / pane_command_status / pane_command_duration /
+#    pane_last_output_time:
 #    "a command started and has not finished" is fact there, even through ssh — but
 #    running:true also describes a shell merely waiting for input, so read
-#    evidence.screen before acting on it. Absent (not empty) on 3.2a–3.7c.
+#    evidence.screen before acting on it. Absent (not empty) without command tracking.
 $TD screen -n demo --runs                          # SGR attribute runs (token-cheap)
 $TD screen -n demo -J                              # join the lines tmux wrapped at the right edge
 $TD screen -n demo -N                              # keep trailing cells (what a painted background needs)
@@ -229,7 +257,9 @@ stall signals, the native command status on 3.8+), while the text/grid flags (`-
 the screen. Asking for both is refused with `invalid-arguments` rather than silently
 returning one — a flag that was dropped without saying so is the kind of silence this tool
 does not sell. Same rule in `wait`: `--scrollback` widens only the `--until` search, and
-`--expect-code` needs a command that can answer a code (the `true` probe cannot).
+`--expect-code` needs an oracle that can read a code: the `true` probe cannot (it runs
+`true`), and neither can the quiet sampling `--done` falls back to when the target has no
+completion markers. Both refuse with `invalid-arguments` instead of ignoring the number.
 
 `screen --find` returns every literal match with **1-based, click-ready**
 coordinates — the locate-then-click flow is a single hop:
@@ -321,8 +351,15 @@ server owns PTYs/sessions. All state lives on disk under
   `r` resize, `m` sync points). The ground truth for protocol-level bytes.
 - **`state.json`** — locator + recorder state, written atomically (tmp + rename).
   `last_send_offset` is a **byte offset** into `raw.log`, so `--cmd-done` only
-  accepts markers emitted after your last send — a typed echo can never fake
-  completion.
+  accepts markers emitted after your last send. Position is necessary and not
+  enough: the recorder lags the pane, so a busy shell can deliver the *previous*
+  command's `C` and `D` inside your window. term-use calls a completion yours only
+  when it can bind it — the echo of the line you typed sits before the `C` that
+  opened it, or (a keys-only send) the recording was quiet when `send` measured it.
+  When neither can be proved the wait keeps failing and the evidence says
+  `"degraded": "unattributed-marker"`: type the command with `--type`, or use
+  `--shell-ready`. On tmux 3.8+ the native channel answers this by start time and
+  needs neither. `last_send_settled` is that per-send drain answer.
 
 Every mechanism claim in this guide is exercised by the E2E suite
 (`tests/e2e/*.sh`), which drives real tmux and real programs through the CLI
@@ -340,9 +377,13 @@ only — nothing is mocked.
   put the marker you wait for inside your sent text; split it at runtime
   (`print('OUT_' + '42')`). Leftover echoes from earlier experiments pollute
   later waits — use a fresh session for sensitive experiments.
-- **Spinners defeat quiet** — `--quiet-ms` also gates on the raw stream's
-  last-write time, but pick 2-3x the frame period and anchor with `--until`
-  when possible. A program that *starts* spinning after your input can
+- **Spinners defeat quiet — cell-painting ones only.** `--quiet-ms` gates on the
+  last write that can reach the grid, so a program animating *just its window
+  title* (`ESC ]0;⠏ … BEL` every 100 ms over a byte-identical screen) settles
+  instead of burning your timeout; the verdict says it settled on pixels with
+  `program_running`. A spinner that repaints cells still never settles: pick
+  2-3x the frame period and anchor with `--until` when possible. A program that
+  *starts* spinning after your input can
   false-settle a large quiet value — wait for the stream to start first.
   **Menus are quiet-hostile**: inside modal pickers use `sleep 0.5-1` +
   `screen`, not `--quiet-ms`. Menu arrow keys also debounce: `send --key Up

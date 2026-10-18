@@ -24,6 +24,12 @@ def session_dir(session: str) -> Path:
     return state_root() / session
 
 
+# Key names that submit a line. Three readers need the same list (what is pending,
+# what was asked to run, whether this send may carry a marker), and a fourth added
+# here is cheaper than a fourth spelling of the same rule.
+SUBMIT_KEYS = ("enter", "c-m", "c-j", "m-enter")
+
+
 def read_state(session: str) -> dict:
     p = session_dir(session) / "state.json"
     if not p.exists():
@@ -67,6 +73,38 @@ def stream_since(session: str, offset: int) -> str:
     """Concatenate o-event payloads from raw.log starting at byte offset."""
     return "".join(data for _, code, data, _ in events_since(session, offset)
                    if code == "o" and isinstance(data, str))
+
+
+def drain_offset(session: str, settle_s: float = 0.05,
+                 timeout_s: float = 0.6) -> tuple[int, bool]:
+    """Where the recording ends right now, and whether the recorder had caught up.
+
+    `send` needs a byte position that marks "nothing before this belongs to what
+    I am about to cause". The file size is that position only if pipe.py has
+    already flushed what the pane emitted *before* the injection — and it
+    usually has not: the recorder lags the pane, so a just-finished command's
+    trailing markers can land inside the next command's window.
+
+    Two consecutive equal size reads mean the recorder is quiet, which is the
+    strongest statement available on a server without 3.8's command tracking. A
+    stream still growing at `timeout_s` (a spinner, a build) returns the size it
+    reached plus False: the caller then knows its own offset is not trustworthy
+    and must find another way to bind the marker to the send, or not claim fact.
+    """
+    path = session_dir(session) / "raw.log"
+    deadline = time.monotonic() + timeout_s
+    last = -1
+    while True:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return 0, True          # no recording: there is nothing to lag behind
+        if size == last:
+            return size, True
+        if time.monotonic() >= deadline:
+            return size, False
+        last = size
+        time.sleep(settle_s)
 
 
 def header(session: str) -> dict | None:
@@ -130,18 +168,28 @@ def output_age_s(session: str) -> float | None:
 # raw.log stores the stream as JSON strings, and JSON escapes control characters
 # even with ensure_ascii=False — so on disk the marker reads `\u001b]133;A`, not
 # the raw byte. Match both spellings rather than betting on which one appears.
-_MARKERS = tuple(
+# A prompt marker (A/B) proves the shell runs its own prompt cycle. A bare 133
+# C/D may be term-use's own sentinel, so it is not proof of shell integration;
+# any 633 marker is another tool's integration (our sentinel only writes 133).
+_PROMPT_MARKERS = tuple(
     f"{esc}]{code};{letter}".encode()
-    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "ABCD")
+    for esc in ("\\u001b", "\x1b") for code in ("133", "633") for letter in "AB")
+_633_MARKERS = tuple(
+    f"{esc}]{code};".encode()
+    for esc in ("\\u001b", "\x1b") for code in ("633",))
 
 
 def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
-    """Has this pane actually emitted command markers? Evidence, not assumption.
+    """Has this pane's shell run its own prompt cycle? Evidence, not assumption.
 
     `start` can only know what it injected itself; fish >= 4.0 emits OSC 133
     natively and a user's zsh/bash may carry VSCode's (633) or WezTerm's (133)
     integration. Refusing those sessions was a portability hole — the strongest
     evidence the tool offers was gated on a guess made at launch time.
+
+    Proof is a prompt marker (A/B) or another tool's 633 stream. A bare 133 C/D
+    can be term-use's own sentinel, which says the shell can be narrated, not
+    that it reports for itself.
     """
     path = session_dir(session) / "raw.log"
     deadline = time.monotonic() + wait_s
@@ -153,7 +201,8 @@ def detect_shell_integration(session: str, wait_s: float = 0.0) -> bool:
         with path.open("rb") as fh:
             fh.seek(max(0, size - 65536))
             chunk = fh.read()
-        if any(m in chunk for m in _MARKERS):
+        if any(m in chunk for m in _PROMPT_MARKERS) \
+                or any(m in chunk for m in _633_MARKERS):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -193,7 +242,7 @@ def pending_input(session: str, since_offset: int) -> str | None:
             if "text" in ev:
                 typed += ev["text"]
             elif "key" in ev:
-                if str(ev["key"]).lower() in ("enter", "c-m", "c-j", "m-enter"):
+                if str(ev["key"]).lower() in SUBMIT_KEYS:
                     typed = ""  # the line was submitted: nothing pending
     return typed or None
 
@@ -211,10 +260,36 @@ def last_sent_text(session: str, since_offset: int) -> str | None:
             continue
         text = "".join(ev["text"] for ev in data
                        if isinstance(ev, dict) and "text" in ev)
-        if any(isinstance(ev, dict) and str(ev.get("key", "")).lower()
-               in ("enter", "c-m", "c-j", "m-enter") for ev in data):
+        if any(isinstance(ev, dict)
+               and str(ev.get("key", "")).lower() in SUBMIT_KEYS for ev in data):
             last = text or None
     return last
+
+
+def shell_markers_proven(session: str) -> bool:
+    """Does this pane's shell run its own prompt cycle, without our help?
+
+    term-use's completion sentinel writes a `C`+`D` pair, so a `D` somewhere in the
+    stream proves a command finished — not that the *shell* will keep reporting
+    them. A prompt marker (`A`/`B`, produced by PS1/PROMPT_COMMAND machinery, which
+    is exactly what a wrapper like blerust takes over) together with a `D` is that
+    proof, and it is what decides whether `send` has to append a sentinel at all.
+    """
+    path = session_dir(session) / "raw.log"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    with path.open("rb") as fh:
+        fh.seek(max(0, size - 65536))
+        chunk = fh.read()
+
+    def seen(*letters: str) -> bool:
+        return any(f"{esc}]{code};{letter}".encode() in chunk
+                   for esc in ("\\u001b", "\x1b") for code in ("133", "633")
+                   for letter in letters)
+
+    return seen("A", "B") and seen("D")
 
 
 class V2Writer:

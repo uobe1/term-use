@@ -10,6 +10,8 @@ TD="python3 -m termuse"
 NAME="td14_$$_$RANDOM"
 SOCK="td14sock_$$_$RANDOM"
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/tmux"
+export TMUX_TMPDIR="$TMP/tmux"
 export XDG_STATE_HOME="$TMP/state"
 
 cleanup() { tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true; rm -rf "$TMP"; }
@@ -31,7 +33,10 @@ $TD wait -n "$NAME" --until 'SELECTED:0' --timeout 10 >/dev/null || fail "fixtur
 
 # --- control: one call with two Ups is debounced to a single move ---
 $TD send -n "$NAME" --key Up --key Up >/dev/null || fail "send failed"
-sleep 1
+# The gap must be wider than the debounce window: the first repetition is a
+# separate process, and on a fast box it can arrive within the window measured
+# from the control's applied Up. Sleep past it before starting the repeat.
+sleep 2
 [ "$(selected)" = "SELECTED:1" ] || fail "one-call two Ups should move once, got: $(selected)"
 
 # --- --repeat 2 --delay 2.2 (> the debounce window): each repetition is a full
@@ -52,7 +57,10 @@ python3 -c "
 import json
 first = json.load(open('$TMP/first.json'))
 s = first['sent']
-assert s['text'].endswith('menu_debounce.py') and s['keys'] == ['Enter'], first
+head = s['text'].split('; __tu_ec')[0]
+assert head.endswith('menu_debounce.py') and s['keys'] == ['Enter'], first
+# a lengthened line is only acceptable when the reply says so (see e2e-33)
+assert ('; __tu_ec' not in s['text']) or first.get('marker') == 'sentinel', first
 assert s['calls'] == 2, first
 assert 'repeat' not in first, f'--repeat 1 must not print a constant: {first}'
 rep = json.load(open('$TMP/repeat.json'))

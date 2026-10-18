@@ -33,12 +33,19 @@ def test_semicolon_line_names_the_command_the_code_came_from():
     assert "deploy.py init" not in note, "the earlier stage is not the answer"
 
 
-def test_short_circuit_names_the_last_stage():
+def test_short_circuit_operators_get_their_own_meaning():
+    # `&&` and `||` invert each other on a zero, and one note covering both used
+    # to tell `||` users that zero meant every stage passed — when it means the
+    # last stage never ran.
     note = line_scope("make && make install")
-    assert "`&&`/`||`" in note and "zero means every stage passed" in note, note
+    assert "`&&`" in note and "zero means every stage passed" in note, note
+    assert "`||`" not in note, f"&& must not inherit the || caveat: {note}"
     assert "make install" in note, f"must name the last stage: {note}"
     note2 = line_scope("a || b")
-    assert "`&&`/`||`" in note2 and "`;`" not in note2 and "b" in note2
+    assert "`||`" in note2 and "`&&`" not in note2 and "`;`" not in note2, note2
+    assert "already succeeded" in note2, note2
+    both = line_scope("a && b || c")
+    assert "`&&`" in both and "`||`" in both, both
 
 
 def test_pipeline_reports_the_last_stage():

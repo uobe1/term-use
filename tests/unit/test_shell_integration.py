@@ -68,6 +68,12 @@ def test_detect_shell_integration_matches_how_the_log_stores_escapes():
             n.append("o", "\x1b]633;D;0\x07")
             assert records.detect_shell_integration("vscode") is True
 
+            # Our sentinel writes 133 C/D with no prompt marker. That proves
+            # the shell can be narrated, not that it reports for itself.
+            s = records.V2Writer.fresh("sentinelonly", 80, 24, "bash", None)
+            s.append("o", "\x1b]133;C\x07\x1b]133;D;0\x07")
+            assert records.detect_shell_integration("sentinelonly") is False
+
             assert records.detect_shell_integration("no-such-session") is False
         finally:
             if old is None:

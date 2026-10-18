@@ -19,11 +19,11 @@ from termuse.errors import TDError
 def ok(res: subprocess.CompletedProcess) -> bool:
     """Did tmux actually do it? Exit code alone is not enough.
 
-    Measured on tmux 3.7c: a client that cannot reach its server (a socket
-    owned by another security context in a shared /tmp/tmux-<uid>) prints
-    "access not allowed" and still exits 0. Trusting the code alone made
-    `start` answer "session already exists" for a server it never contacted,
-    and made `capture-pane` answer "the screen is empty" for a failed read.
+    A client that cannot reach its server (a socket owned by another security
+    context in a shared /tmp/tmux-<uid>) can print "access not allowed" and
+    still exit 0. Trusting the code alone makes `start` answer "session already
+    exists" for a server it never contacted, and makes `capture-pane` answer
+    "the screen is empty" for a failed read.
     """
     return res.returncode == 0 and not (res.stderr or "").strip()
 
@@ -133,10 +133,9 @@ def capture(target: Target, flags: tuple[str, ...] = ()) -> str:
 def signal_name(value: str) -> str:
     """Normalize a dead-pane signal to its name.
 
-    tmux answers `#{pane_dead_signal}` with a name on some builds and a bare
-    number on others (measured: "9" on tmux 3.7c/Linux, "KILL" on the Termux
-    device the harness was written against) — agents must not have to know
-    which their server speaks.
+    tmux answers `#{pane_dead_signal}` with a bare number on some builds and a
+    name on others ("9" vs "KILL") — agents must not have to know which their
+    server speaks.
     """
     if value.isdigit():
         try:
@@ -153,7 +152,7 @@ def signal_name(value: str) -> str:
 NATIVE_KEYS = ("pane_command_status", "pane_command_running",
                "pane_command_start_time", "pane_command_end_time",
                "pane_command_duration", "pane_last_prompt_time",
-               "pane_output_generation")
+               "pane_last_output_time", "pane_output_generation")
 
 
 def meta(target: Target) -> dict:
